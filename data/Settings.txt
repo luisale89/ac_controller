@@ -1,0 +1,5 @@
+{
+  "value": "enable",
+  "on_condition": "presence",
+  "off_condition": "presence"
+}

@@ -78,6 +78,7 @@ String epass = "";
 bool testWifi(void);
 void launchWeb(void);
 void setupAP(void);
+void createWebServer(void);
 // Establishing Local server at port 80
 WebServer server(80);
 // Initialize the Wifi client library
@@ -110,6 +111,250 @@ double t;
 const char *ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = -4 * 3600;
 const int daylightOffset_sec = 0;
+
+// Guarda el estado del sistema
+void spiffs_save_state() //[OK]
+{
+
+  if (!SPIFFS.begin(true))
+  {
+    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
+    return;
+  }
+  File f = SPIFFS.open("/Encendido.txt", "w"); // Borra el contenido anterior del archivo
+
+  // Mensaje de fallo al leer el contenido
+  if (!f)
+  {
+    Serial.println("Archivo no existe, creandolo...");
+    delay(200);
+    // return;
+  }
+  if (!f)
+  {
+    Serial.println("Error al abrir el archivo");
+    delay(200);
+  }
+  String SEncendido = SysState;
+  f.print(SEncendido);
+  f.close();
+}
+
+// unsigned long getTime() {
+void getTime()
+{
+  struct tm timeinfo;
+  getLocalTime(&timeinfo);
+
+  int dia = timeinfo.tm_mday;
+  int mes = timeinfo.tm_mon + 1;
+  int ano = timeinfo.tm_year + 1900;
+  int hora = timeinfo.tm_hour;
+  int minuto = timeinfo.tm_min;
+  int segundo = timeinfo.tm_sec;
+
+  DS1307_RTC.adjust(DateTime(ano, mes, dia, hora, minuto, segundo));
+  Serial.println("Datetime adjusted..");
+  Serial.println("Day: " + String(dia) + "-" + String(hora) + ":" + String(minuto));
+}
+
+void SaveSettings(bool value, String onCondition, String offCondition) //[OK]
+{
+  String json;
+  StaticJsonDocument<96> doc;
+
+  doc["value"] = value;
+  doc["on_condition"] = onCondition;
+  doc["off_condition"] = offCondition;
+
+  serializeJson(doc, json);
+
+  if (!SPIFFS.begin(true))
+  {
+    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
+    return;
+  }
+  File f = SPIFFS.open("/Settings.txt", "w"); // Borra el contenido anterior del archivo
+
+  // Mensaje de fallo al leer el contenido
+  if (!f)
+  {
+    Serial.println("Archivo no existe, creandolo...");
+    delay(200);
+    // return;
+  }
+  if (!f)
+  {
+    Serial.println("Error al abrir el archivo");
+    delay(200);
+  }
+  f.print(json);
+  f.close();
+}
+
+void SettingsSetup() //[OK]
+{
+  if (!SPIFFS.begin(true))
+  {
+    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
+    return;
+  }
+
+  File f = SPIFFS.open("/Settings.txt");
+
+  // Mensaje de fallo al leer el contenido
+  if (!f)
+  {
+    Serial.println("Error al abrir el archivo.");
+    return;
+  }
+  String Settings = f.readString();
+  // String input;
+
+  StaticJsonDocument<128> doc1;
+
+  DeserializationError error = deserializeJson(doc1, Settings);
+
+  if (error)
+  {
+    Serial.print("deserializeJson() failed: ");
+    Serial.println(error.c_str());
+    return;
+  }
+
+  schedule_enabled = doc1["value"];
+  String onCondition = doc1["on_condition"];
+  String offCondition = doc1["off_condition"];
+  on_condition = onCondition;
+  off_condition = offCondition;
+  f.close();
+}
+
+// Guarda el horario de apgado de cada dia
+void SaveSpiff(int HON, int HOFF, String Day, bool enable) //[OK]
+{
+
+  String Hours;
+  StaticJsonDocument<96> doc;
+
+  doc["ON"] = HON;
+  doc["OFF"] = HOFF;
+  doc["enable"] = enable;
+
+  serializeJson(doc, Hours);
+
+  if (!SPIFFS.begin(true))
+  {
+    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
+    return;
+  }
+  File f = SPIFFS.open("/" + Day + ".txt", "w"); // Borra el contenido anterior del archivo
+
+  // Mensaje de fallo al leer el contenido
+  if (!f)
+  {
+    Serial.println("Archivo no existe, creandolo...");
+    delay(200);
+    // return;
+  }
+  if (!f)
+  {
+    Serial.println("Error al abrir el archivo");
+    delay(200);
+  }
+  f.print(Hours);
+  f.close();
+}
+
+// Aqui se guardan la configuracion del modo Auto que llega en el topico
+void SpiffSaveAuto(int wait, int temp) //[DEBUG]
+{
+  StaticJsonDocument<32> doc;
+  String output;
+
+  doc["wait"] = wait;
+  doc["temp"] = temp;
+
+  serializeJson(doc, output);
+  if (!SPIFFS.begin(true))
+  {
+    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
+    return;
+  }
+  File f = SPIFFS.open("/Auto.txt", "w"); // Borra el contenido anterior del archivo
+
+  // Mensaje de fallo al leer el contenido
+  if (!f)
+  {
+    Serial.println("Archivo no existe, creandolo...");
+    delay(200);
+    // return;
+  }
+  if (!f)
+  {
+    Serial.println("Error al abrir el archivo");
+    delay(200);
+  }
+  f.println(output);
+  f.close();
+  AutoTimeOut = wait * 1000; // 1234 -- debug: this must be multiplied by 60_000L to convert minutes into ms
+  AutoTemp = temp;           // 24
+}
+
+// Aqui se guarda el modo que llega desde el topico
+void SpiffSaveModo(String Modo) //[OK]
+{
+  if (!SPIFFS.begin(true))
+  {
+    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
+    return;
+  }
+  File f = SPIFFS.open("/Modo.txt", "w"); // Borra el contenido anterior del archivo
+
+  // Mensaje de fallo al leer el contenido
+  if (!f)
+  {
+    Serial.println("Archivo no existe, creandolo...");
+    delay(200);
+    // return;
+  }
+  if (!f)
+  {
+    Serial.println("Error al abrir el archivo");
+    delay(200);
+  }
+  f.print(Modo);
+  f.close();
+  SysMode = Modo;
+}
+
+// Lee la variable de encendio o apadado de tago
+void set_sys_state(String json) //[NEW, OK]
+{
+  // String input;
+
+  StaticJsonDocument<96> doc;
+
+  DeserializationError error = deserializeJson(doc, json);
+  if (error)
+  {
+    Serial.print("deserializeJson() failed: ");
+    Serial.println(error.c_str());
+    return;
+  }
+  String variable = doc["variable"]; // "system_state"
+  String value = doc["value"];       // "on"
+
+  if (value == "off" || value == "on")
+  {
+    SysState = value;
+  }
+  else
+  {
+    Serial.println("Error: invalid value received from broker on -system_state-");
+  }
+  spiffs_save_state();
+}
 
 // Establece el encendido o apagado al inicio
 void SetEncendido() //[OK]
@@ -226,51 +471,6 @@ void SetFuncModo() //[OK]
   file.close();
 }
 
-// Funcion que recibe la data de Tago por MQTT
-void callback(char *topicp, byte *payload, unsigned int length) //[OK]
-{
-  Serial.print("Message arrived in topic: ");
-  Serial.println(topicp);
-  Serial.print("Message:");
-  String Mensaje;
-  for (int i = 0; i < length; i++)
-  {
-
-    Serial.print((char)payload[i]);
-
-    Mensaje = Mensaje + (char)payload[i];
-  }
-  Serial.println("Este es el mensaje " + Mensaje);
-
-  // Selecciona la funcion acorde al topico al cual llego el mensaje
-  if (String(topicp) == "system/operation/settings")
-  {
-    // Cambia la configuracion del sistema
-    Serial.println("-Settings-");
-    Settings(Mensaje);
-  }
-  else if (String(topicp) == "system/operation/state")
-  {
-    // Apaga o enciende el sistema
-    Serial.println("-System State-");
-    set_sys_state(Mensaje);
-  }
-  else if (String(topicp) == "system/operation/setpoint")
-  {
-    // Ajusta la temperatura del ambiente
-    Serial.println("-Setpoint-");
-    setpoint(Mensaje);
-  }
-
-  Serial.println();
-  Serial.println("-----------------------");
-  Mensaje = "";
-
-  // Levanta el Flag para envio de datos
-  delay(100);
-  Envio = true;
-}
-
 // Guarda la configuracion que se envia en el topico
 void Settings(String json) //[OK]
 {
@@ -331,134 +531,6 @@ void Settings(String json) //[OK]
   }
 }
 
-// Aqui se guardan la configuracion del modo Auto que llega en el topico
-void SpiffSaveAuto(int wait, int temp) //[DEBUG]
-{
-  StaticJsonDocument<32> doc;
-  String output;
-
-  doc["wait"] = wait;
-  doc["temp"] = temp;
-
-  serializeJson(doc, output);
-  if (!SPIFFS.begin(true))
-  {
-    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
-    return;
-  }
-  File f = SPIFFS.open("/Auto.txt", "w"); // Borra el contenido anterior del archivo
-
-  // Mensaje de fallo al leer el contenido
-  if (!f)
-  {
-    Serial.println("Archivo no existe, creandolo...");
-    delay(200);
-    // return;
-  }
-  if (!f)
-  {
-    Serial.println("Error al abrir el archivo");
-    delay(200);
-  }
-  f.println(output);
-  f.close();
-  AutoTimeOut = wait * 1000; // 1234 -- debug: this must be multiplied by 60_000L to convert minutes into ms
-  AutoTemp = temp;           // 24
-}
-
-// Aqui se guarda el modo que llega desde el topico
-void SpiffSaveModo(String Modo) //[OK]
-{
-  if (!SPIFFS.begin(true))
-  {
-    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
-    return;
-  }
-  File f = SPIFFS.open("/Modo.txt", "w"); // Borra el contenido anterior del archivo
-
-  // Mensaje de fallo al leer el contenido
-  if (!f)
-  {
-    Serial.println("Archivo no existe, creandolo...");
-    delay(200);
-    // return;
-  }
-  if (!f)
-  {
-    Serial.println("Error al abrir el archivo");
-    delay(200);
-  }
-  f.print(Modo);
-  f.close();
-  SysMode = Modo;
-}
-
-void SettingsSetup() //[OK]
-{
-  if (!SPIFFS.begin(true))
-  {
-    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
-    return;
-  }
-
-  File f = SPIFFS.open("/Settings.txt");
-
-  // Mensaje de fallo al leer el contenido
-  if (!f)
-  {
-    Serial.println("Error al abrir el archivo.");
-    return;
-  }
-  String Settings = f.readString();
-  // String input;
-
-  StaticJsonDocument<128> doc1;
-
-  DeserializationError error = deserializeJson(doc1, Settings);
-
-  if (error)
-  {
-    Serial.print("deserializeJson() failed: ");
-    Serial.println(error.c_str());
-    return;
-  }
-
-  schedule_enabled = doc1["value"];
-  String onCondition = doc1["on_condition"];
-  String offCondition = doc1["off_condition"];
-  on_condition = onCondition;
-  off_condition = offCondition;
-  f.close();
-}
-
-// Lee la variable de encendio o apadado de tago
-void set_sys_state(String json) //[NEW, OK]
-{
-  // String input;
-
-  StaticJsonDocument<96> doc;
-
-  DeserializationError error = deserializeJson(doc, json);
-  if (error)
-  {
-    Serial.print("deserializeJson() failed: ");
-    Serial.println(error.c_str());
-    return;
-  }
-  String variable = doc["variable"]; // "system_state"
-  String value = doc["value"];       // "on"
-
-  if (value == "off" || value == "on")
-  {
-    SysState = value;
-  }
-  else
-  {
-    Serial.println("Error: invalid value received from broker on -system_state-");
-  }
-  spiffs_save_state();
-}
-
 // Guarda el Setpoint en SPIFF
 void setpoint(String json) //[OK]
 {
@@ -501,102 +573,49 @@ void setpoint(String json) //[OK]
   f.close();
 }
 
-// Guarda el estado del sistema
-void spiffs_save_state() //[OK]
+// Funcion que recibe la data de Tago por MQTT
+void callback(char *topicp, byte *payload, unsigned int length) //[OK]
 {
-
-  if (!SPIFFS.begin(true))
+  Serial.print("Message arrived in topic: ");
+  Serial.println(topicp);
+  Serial.print("Message:");
+  String Mensaje;
+  for (int i = 0; i < length; i++)
   {
-    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
-    return;
-  }
-  File f = SPIFFS.open("/Encendido.txt", "w"); // Borra el contenido anterior del archivo
 
-  // Mensaje de fallo al leer el contenido
-  if (!f)
+    Serial.print((char)payload[i]);
+
+    Mensaje = Mensaje + (char)payload[i];
+  }
+  Serial.println("Este es el mensaje " + Mensaje);
+
+  // Selecciona la funcion acorde al topico al cual llego el mensaje
+  if (String(topicp) == "system/operation/settings")
   {
-    Serial.println("Archivo no existe, creandolo...");
-    delay(200);
-    // return;
+    // Cambia la configuracion del sistema
+    Serial.println("-Settings-");
+    Settings(Mensaje);
   }
-  if (!f)
+  else if (String(topicp) == "system/operation/state")
   {
-    Serial.println("Error al abrir el archivo");
-    delay(200);
+    // Apaga o enciende el sistema
+    Serial.println("-System State-");
+    set_sys_state(Mensaje);
   }
-  String SEncendido = SysState;
-  f.print(SEncendido);
-  f.close();
-}
-
-// Guarda el horario de apgado de cada dia
-void SaveSpiff(int HON, int HOFF, String Day, bool enable) //[OK]
-{
-
-  String Hours;
-  StaticJsonDocument<96> doc;
-
-  doc["ON"] = HON;
-  doc["OFF"] = HOFF;
-  doc["enable"] = enable;
-
-  serializeJson(doc, Hours);
-
-  if (!SPIFFS.begin(true))
+  else if (String(topicp) == "system/operation/setpoint")
   {
-    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
-    return;
+    // Ajusta la temperatura del ambiente
+    Serial.println("-Setpoint-");
+    setpoint(Mensaje);
   }
-  File f = SPIFFS.open("/" + Day + ".txt", "w"); // Borra el contenido anterior del archivo
 
-  // Mensaje de fallo al leer el contenido
-  if (!f)
-  {
-    Serial.println("Archivo no existe, creandolo...");
-    delay(200);
-    // return;
-  }
-  if (!f)
-  {
-    Serial.println("Error al abrir el archivo");
-    delay(200);
-  }
-  f.print(Hours);
-  f.close();
-}
+  Serial.println();
+  Serial.println("-----------------------");
+  Mensaje = "";
 
-void SaveSettings(bool value, String onCondition, String offCondition) //[OK]
-{
-  String json;
-  StaticJsonDocument<96> doc;
-
-  doc["value"] = value;
-  doc["on_condition"] = onCondition;
-  doc["off_condition"] = offCondition;
-
-  serializeJson(doc, json);
-
-  if (!SPIFFS.begin(true))
-  {
-    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
-    return;
-  }
-  File f = SPIFFS.open("/Settings.txt", "w"); // Borra el contenido anterior del archivo
-
-  // Mensaje de fallo al leer el contenido
-  if (!f)
-  {
-    Serial.println("Archivo no existe, creandolo...");
-    delay(200);
-    // return;
-  }
-  if (!f)
-  {
-    Serial.println("Error al abrir el archivo");
-    delay(200);
-  }
-  f.print(json);
-  f.close();
+  // Levanta el Flag para envio de datos
+  delay(100);
+  Envio = true;
 }
 
 // Funcion que regula la temperatura
@@ -655,7 +674,6 @@ void AutoOn() //[OK]
 
   DateTime now = DS1307_RTC.now();
   String Day = Week_days[now.dayOfTheWeek()];
-  Serial.println(Day);
 
   if (!SPIFFS.begin(true))
   {
@@ -794,12 +812,12 @@ void EncenderApagar() //[ok]
     YState = true; // update YState
   }
   // SysFunc == "off || sleep" will get Y and G to false, as default
-  if (SysFunc == "fan")
+  if (SysFunc == "fan" && SysState == "on")
   {
     Y = false;
     G = true;
   }
-  else if (SysFunc == "cooling")
+  else if (SysFunc == "cooling" && SysState == "on")
   {
     Y = true;
     G = true;
@@ -810,35 +828,40 @@ void EncenderApagar() //[ok]
     return;
   }
 
+  if (SysState == "off" || SysState == "sleep")
+  {
+    Serial.println("Turning off the system..");
+    digitalWrite(Pin_compresor, LOW);
+    delay(250); // delay between relays
+    digitalWrite(Pin_vent, LOW);
+    lastCompressorTurnOff = millis(); // update LastCompressorTurnOff value
+    Envio = true;
+    return;
+  }
   // si el cambio es para que el sistema enfríe..
-  if (Y && G)
+  if (SysFunc == "cooling")
   {
     digitalWrite(Pin_vent, HIGH);
     if (millis() - lastCompressorTurnOff > CompressorTimeOut)
     {
+      Serial.println("Turning on the compressor.. Cooling..");
       delay(250);                        // delay between relays
       digitalWrite(Pin_compresor, HIGH); // aquí se produce el cambio  del YState, y para el próximo loop no entra en esta parte del código..
     }
     else
     {
+      Serial.println("Waiting compressor timeOut..");
       return; // prevent set Envio to true...
     }
   }
   // Si el cambio es para que el sistema no enfríe, pero funcione la turbina del evaporador..
-  else if (!Y && G)
+  else if (SysFunc == "fan")
   {
     digitalWrite(Pin_vent, HIGH);
     digitalWrite(Pin_compresor, LOW);
     lastCompressorTurnOff = millis(); // update LastCompressorTurnOff value
   }
   // Si el cambio es para apagar el sistema..
-  else
-  {
-    digitalWrite(Pin_compresor, LOW);
-    delay(250); // delay between relays
-    digitalWrite(Pin_vent, LOW);
-    lastCompressorTurnOff = millis(); // update LastCompressorTurnOff value
-  }
 
   Envio = true;
   return;
@@ -1045,9 +1068,6 @@ void SensorsRead(void *pvParameters)
       MovingSensor = false;
     }
 
-    // Funcion que controla el apagado y encendido automatico (Sleep)
-    AutoOn();
-
     // user feedback
     if (SysState == "on")
     {
@@ -1062,8 +1082,9 @@ void SensorsRead(void *pvParameters)
     {
       lastControllerTime = millis();
       Tc = Temperature();
-      delay(1000); // debug.. why this delay?
       t = AmbTemperature();
+      // Funcion que controla el apagado y encendido automatico (Sleep)
+      AutoOn();
 
       double tdecimal = (int)(t * 100 + 0.5) / 100.0;
 
@@ -1080,24 +1101,6 @@ void SensorsRead(void *pvParameters)
     DataMQTTSend();
     vTaskDelay(xDelay);
   }
-}
-
-// unsigned long getTime() {
-void getTime()
-{
-  struct tm timeinfo;
-  getLocalTime(&timeinfo);
-
-  int dia = timeinfo.tm_mday;
-  int mes = timeinfo.tm_mon + 1;
-  int ano = timeinfo.tm_year + 1900;
-  int hora = timeinfo.tm_hour;
-  int minuto = timeinfo.tm_min;
-  int segundo = timeinfo.tm_sec;
-
-  DS1307_RTC.adjust(DateTime(ano, mes, dia, hora, minuto, segundo));
-  Serial.println("Datetime adjusted..");
-  Serial.println("Day: " + String(dia) + "-" + String(hora) + ":" + String(minuto));
 }
 
 void setup()
