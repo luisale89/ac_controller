@@ -30,6 +30,7 @@ const int Pin_vent = 26;      // G
 const int oneWireBus = 18;
 const int oneWireAmb = 2;
 #define PIN_SENMOV 5
+#define REMOTE_BUTTON 17
 
 // Setup a oneWire instance to communicate with any OneWire devices
 OneWire oneWire(oneWireBus);
@@ -45,12 +46,14 @@ unsigned long lastControllerTime = 0;
 unsigned long lastSaluteTime = 0;
 unsigned long lastButtonPress = 0;
 unsigned long lastCompressorTurnOff = 0;
+unsigned long lastWifiReconnect = 0;
 unsigned long postingInterval = 2L * 30000L;   // delay between updates, in milliseconds.. 1 minute || 60_000 ms
 unsigned long CompressorTimeOut = 4L * 30000L; // 2 minutos de retardo para habilitar el compresor..
 unsigned long MovingSensorTime = 0;
-const unsigned long buttonTimeOut = 5L * 1000L;      // rebound 5seconds
-const unsigned long controllerInterval = 2L * 5000L; // delay between sensor updates, 10 seconds
-const unsigned long SaluteTimer = 1L * 30000L;       // Tiempo para enviar que el dispositivo esta conectado,
+const unsigned long buttonTimeOut = 5L * 1000L;         // rebound 5seconds
+const unsigned long controllerInterval = 2L * 5000L;    // delay between sensor updates, 10 seconds
+const unsigned long SaluteTimer = 1L * 30000L;          // Tiempo para enviar que el dispositivo esta conectado,
+const unsigned long wifiReconnectInterval = 1 * 30000L; // 30 segundos para intentar reconectar al wifi.
 // MQTT Brokers
 const char *mqtt_broker = "mqtt.tago.io";
 const char *topic = "system/operation/settings";
@@ -72,10 +75,10 @@ const char *ssid = "PHLCONTROLLER";
 const char *passphrase = "12345678";
 String st;
 String content;
-String esid;
+String esid = "";
 String epass = "";
 // Function Decalration
-bool testWifi(void);
+// bool testWifi(void);
 void launchWeb(void);
 void setupAP(void);
 void createWebServer(void);
@@ -97,10 +100,10 @@ String SysMode;         // auto, fan, cool
 String SysFunc = "fan"; // cooling, fan
 String on_condition;
 String off_condition;
+String Sleep = "undef"; // first value for Sleep variable
 float SelectTemp;
 float AutoTemp;
 float CurrentSysTemp;
-bool Sleep = false;
 bool Salute = false;
 bool MovingSensor = false;
 bool schedule_enabled; // Variables de activacion del modo sleep
@@ -668,7 +671,8 @@ void AutoOn() //[OK]
 
   if (!schedule_enabled)
   {
-    Sleep = false;
+    Serial.println("Schedule disabled..");
+    Sleep = "off";
     return;
   }
 
@@ -709,7 +713,7 @@ void AutoOn() //[OK]
   bool enable = doc["enable"];
   if (!enable)
   {
-    Sleep = false;
+    Sleep = "off";
     return;
   }
 
@@ -728,25 +732,27 @@ void AutoOn() //[OK]
   }
   String tiempo = hora + minuto;
   Serial.println("tiempo: " + tiempo);
-  Serial.println("ON: ");
-  Serial.print(ON);
-  Serial.println("OFF: ");
-  Serial.print(OFF);
+  Serial.print("WakeUp at: ");
+  Serial.println(ON);
+  Serial.print("Sleep at: ");
+  Serial.println(OFF);
 
   if (OFF > tiempo.toInt() && ON < tiempo.toInt())
   {
-    if (Sleep)
+    // Si el sleep está activado, o si es la primera verificación después del arranque..
+    if (Sleep == "on" || Sleep == "undef")
     {
       if (on_condition == "presence" && MovingSensor)
       {
-        Sleep = false;
+        Sleep = "off";
       }
       else if (on_condition == "on_time")
       {
-        Sleep = false;
+        Sleep = "off";
       }
-      if (!Sleep)
+      if (Sleep == "off")
       {
+        Serial.println("New [variable] Sleep: " + String(Sleep));
         SysState = "on";
         spiffs_save_state();
       }
@@ -754,23 +760,24 @@ void AutoOn() //[OK]
   }
   else
   {
-    if (!Sleep)
+    if (Sleep == "off" || Sleep == "undef")
     {
       if (off_condition == "presence" && !MovingSensor)
       {
         // SleepState
-        Sleep = true;
+        Sleep = "on";
       }
       else if (off_condition == "on_time")
       {
         // SleepState
-        Sleep = true;
+        Sleep = "on";
       }
-      if (Sleep)
+      if (Sleep == "on")
       {
+        Serial.println("New [variable] Sleep: " + String(Sleep));
         SysState = "sleep";
         spiffs_save_state();
-        getTime(); // update the time on each Sleep event
+        getTime(); // update the time on each sleep event
       }
     }
   }
@@ -914,38 +921,45 @@ void wifiloop() //[ok]
       Serial.println("MQTT Dispositivo conectado");
     }
   }
-  if (testWifi() && (digitalRead(15) != 1))
+  // WiFi Reconnect
+  if ((WiFi.status() != WL_CONNECTED) && (millis() - lastWifiReconnect >= wifiReconnectInterval))
   {
-    // Serial.println(" connection status positive");
-
-    return;
+    Serial.println("Device disconnected from WiFi network..");
+    Serial.print("Connection status: ");
+    Serial.println(WiFi.status());
+    Serial.println("Trying to reconnect to WiFi...");
+    WiFi.disconnect();
+    WiFi.begin(esid.c_str(), epass.c_str());
+    lastWifiReconnect = millis();
   }
-  else
+  // only turn hotspot on when the button in D15 is pressed..
+  if ((digitalRead(15) == 1))
   {
-    Serial.println("Connection Status Negative / D15 HIGH");
+    Serial.println("D15 HIGH");
     Serial.println("Turning the HotSpot On");
     launchWeb();
     setupAP(); // Setup HotSpot
-  }
-  Serial.println();
-  Serial.println("Waiting.");
-  while ((WiFi.status() != WL_CONNECTED))
-  {
-    Serial.print(".");
+    Serial.println();
+    Serial.println("Waiting.");
+    while ((WiFi.status() != WL_CONNECTED))
+    {
+      Serial.print(".");
+      delay(500);
+      server.handleClient();
+      conectado = true;
+    }
     delay(500);
-    server.handleClient();
-    conectado = true;
   }
-  delay(500);
 }
 
 // Codigo del boton de interrupcion
-void IRAM_ATTR PowerAC() //[ok]
+void PowerAC() //[ok]
 {
   // Apaga o enciende el aire depediendo del estado
 
-  if (millis() - lastButtonPress > buttonTimeOut)
+  if (digitalRead(REMOTE_BUTTON) && millis() - lastButtonPress > buttonTimeOut)
   {
+    Serial.println("Remote Button pressed..");
     getTime(); // update the datetime on every button press.
     if (SysState == "on")
     {
@@ -961,7 +975,7 @@ void IRAM_ATTR PowerAC() //[ok]
     {
       // on Sleep State, the user can't change the System State with the local button..
       // block State change and notify to the user with blinking led.
-      for (int i = 0; i <= 2; i++)
+      for (int i = 0; i <= 2; i++) // three times
       {
         digitalWrite(16, HIGH);
         delay(125);
@@ -1049,10 +1063,6 @@ void DataMQTTSend() //[ok]
 // Hace la lectura y envio de datos de manera periodica
 void SensorsRead(void *pvParameters)
 {
-  // while (conectado) debug: why this? we need offline operations
-  // {
-  //   delay(10);
-  // }
 
   const TickType_t xDelay = 50 / portTICK_PERIOD_MS;
   for (;;)
@@ -1068,16 +1078,6 @@ void SensorsRead(void *pvParameters)
       MovingSensor = false;
     }
 
-    // user feedback
-    if (SysState == "on")
-    {
-      digitalWrite(16, HIGH); // remote board led on..
-    }
-    else
-    {
-      digitalWrite(16, LOW); // remote board led off...
-    }
-
     if (millis() - lastControllerTime > controllerInterval)
     {
       lastControllerTime = millis();
@@ -1090,13 +1090,34 @@ void SensorsRead(void *pvParameters)
 
       // Funcion que regula latemperatura segun el modo (Cool, auto, fan)
       TempRegulator(tdecimal);
+
+      // Serial feedback
+      Serial.println("SysState: " + String(SysState));
+      Serial.println("SysFunc: " + String(SysFunc));
+      Serial.print("Movement: ");
+      Serial.println(MovingSensor);
     }
 
+    // Check if the remote button is pressed
+    PowerAC();
+
+    // user feedback
+    if (SysState == "on")
+    {
+      digitalWrite(16, HIGH); // remote board led on..
+    }
+    else
+    {
+      digitalWrite(16, LOW); // remote board led off...
+    }
+
+    // flag to send data to tago.io
     if (millis() - lastConnectionTime > postingInterval)
     {
       Envio = true;
     }
 
+    // update outputs and send data to broker.
     EncenderApagar();
     DataMQTTSend();
     vTaskDelay(xDelay);
@@ -1109,6 +1130,7 @@ void setup()
   // pins definition
   pinMode(15, INPUT);             // Wifi Restart
   pinMode(PIN_SENMOV, INPUT);     // sensor de presencia
+  pinMode(REMOTE_BUTTON, INPUT);  // remote board button.
   pinMode(16, OUTPUT);            // remote board led.
   pinMode(Pin_compresor, OUTPUT); // Compresor
   pinMode(Pin_vent, OUTPUT);      // Ventilador
@@ -1125,8 +1147,9 @@ void setup()
       ;
   }
 
-  // Boton de interrupcion
-  attachInterrupt(17, PowerAC, HIGH);
+  // // Boton de interrupcion
+  // Interrupción está causando problemas... se reinicia la placa (Luis Lucena)
+  // attachInterrupt(17, PowerAC, HIGH);
 
   // Inicio Sensores OneWire
   sensors.begin();
@@ -1167,6 +1190,10 @@ void setup()
   {
     esid += char(EEPROM.read(i));
   }
+  if (esid == "")
+  {
+    esid = "default-network";
+  }
   Serial.println();
   Serial.print("SSID: ");
   Serial.println(esid);
@@ -1175,15 +1202,16 @@ void setup()
   {
     epass += char(EEPROM.read(i));
   }
+  if (epass == "")
+  {
+    epass = "default-pwd";
+  }
   Serial.print("PASS: ");
   Serial.println(epass);
-  //--- wifi connection - debug: This will block the SensorsRead exec?
+  //--- wifi connection
   WiFi.begin(esid.c_str(), epass.c_str());
-  //--- mqtt buffer settings ---
-  bool buffer_changed = client.setBufferSize(mqttBufferSize); // LuisLucena
-  Serial.print("mqtt buffer changed: ");
-  Serial.println(buffer_changed);
-  //--- end ---
+  //--- mqtt settings ---
+  client.setBufferSize(mqttBufferSize);
   client.setServer(mqtt_broker, mqtt_port);
   client.setCallback(callback);
 
@@ -1209,24 +1237,24 @@ void loop()
 }
 
 //-----------------------------------------------Funciones para conexion Wifi, guardar credenciales y conectar, no hay que cambiar
-bool testWifi(void)
-{
-  int c = 0;
-  // Serial.println("Waiting for Wifi to connect");
-  while (c < 20)
-  {
-    if (WiFi.status() == WL_CONNECTED)
-    {
-      return true;
-    }
-    delay(500);
-    Serial.print("*");
-    c++;
-  }
-  Serial.println("");
-  Serial.println("Connect timed out, opening AP");
-  return false;
-}
+// bool testWifi(void)
+// {
+//   int c = 0;
+//   // Serial.println("Waiting for Wifi to connect");
+//   while (c < 20)
+//   {
+//     if (WiFi.status() == WL_CONNECTED)
+//     {
+//       return true;
+//     }
+//     delay(500);
+//     Serial.print("*");
+//     c++;
+//   }
+//   Serial.println("");
+//   Serial.println("Wifi connection timed out,");
+//   return false;
+// }
 void launchWeb()
 {
   Serial.println("");
