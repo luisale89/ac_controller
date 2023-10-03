@@ -147,18 +147,23 @@ void spiffs_save_state() //[OK]
 void getTime()
 {
   struct tm timeinfo;
-  getLocalTime(&timeinfo);
+  if (getLocalTime(&timeinfo))
+  {
+    int dia = timeinfo.tm_mday;
+    int mes = timeinfo.tm_mon + 1;
+    int ano = timeinfo.tm_year + 1900;
+    int hora = timeinfo.tm_hour;
+    int minuto = timeinfo.tm_min;
+    int segundo = timeinfo.tm_sec;
 
-  int dia = timeinfo.tm_mday;
-  int mes = timeinfo.tm_mon + 1;
-  int ano = timeinfo.tm_year + 1900;
-  int hora = timeinfo.tm_hour;
-  int minuto = timeinfo.tm_min;
-  int segundo = timeinfo.tm_sec;
-
-  DS1307_RTC.adjust(DateTime(ano, mes, dia, hora, minuto, segundo));
-  Serial.println("Datetime adjusted..");
-  Serial.println("Day: " + String(dia) + "-" + String(hora) + ":" + String(minuto));
+    DS1307_RTC.adjust(DateTime(ano, mes, dia, hora, minuto, segundo));
+    Serial.println("Datetime updated..");
+    Serial.println("Day: " + String(dia) + "-" + String(hora) + ":" + String(minuto));
+  }
+  else
+  {
+    Serial.println("Could not obtain time info from NTP Server, Skiping RTC update");
+  }
 }
 
 void SaveSettings(bool value, String onCondition, String offCondition) //[OK]
@@ -777,7 +782,6 @@ void AutoOn() //[OK]
         Serial.println("New [variable] Sleep: " + String(Sleep));
         SysState = "sleep";
         spiffs_save_state();
-        getTime(); // update the time on each sleep event
       }
     }
   }
@@ -842,6 +846,7 @@ void EncenderApagar() //[ok]
     delay(250); // delay between relays
     digitalWrite(Pin_vent, LOW);
     lastCompressorTurnOff = millis(); // update LastCompressorTurnOff value
+    getTime();                        // update RTC Time (if connected with NTP Server.)
     Envio = true;
     return;
   }
@@ -900,7 +905,7 @@ void wifiloop() //[ok]
         {
           Serial.print("failed mqtt connection with state: ");
           Serial.println(client.state());
-          delay(100);
+          delay(250);
         }
       }
       // Publish and subscribe
@@ -960,7 +965,6 @@ void PowerAC() //[ok]
   if (digitalRead(REMOTE_BUTTON) && millis() - lastButtonPress > buttonTimeOut)
   {
     Serial.println("Remote Button pressed..");
-    getTime(); // update the datetime on every button press.
     if (SysState == "on")
     {
       SysState = "off";
@@ -1042,8 +1046,9 @@ void DataMQTTSend() //[ok]
   serializeJson(doc, output);
   Serial.println(output);
   // Serial.println(output);
-  client.publish("tago/data/post", output.c_str());
-  Serial.println("Envio de Datos");
+  bool mqtt_msg_sent = client.publish("tago/data/post", output.c_str());
+  Serial.print("MQTT publish result: ");
+  Serial.println(mqtt_msg_sent);
 
   // update postingInterval, lower if the system is on
 
@@ -1096,6 +1101,7 @@ void SensorsRead(void *pvParameters)
       Serial.println("SysFunc: " + String(SysFunc));
       Serial.print("Movement: ");
       Serial.println(MovingSensor);
+      Serial.println("---**---");
     }
 
     // Check if the remote button is pressed
