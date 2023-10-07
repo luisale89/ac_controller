@@ -47,13 +47,16 @@ unsigned long lastSaluteTime = 0;
 unsigned long lastButtonPress = 0;
 unsigned long lastCompressorTurnOff = 0;
 unsigned long lastWifiReconnect = 0;
+unsigned long lastMqttReconnect = 0;
 unsigned long postingInterval = 2L * 30000L;   // delay between updates, in milliseconds.. 1 minute || 60_000 ms
 unsigned long CompressorTimeOut = 4L * 30000L; // 2 minutos de retardo para habilitar el compresor..
 unsigned long MovingSensorTime = 0;
-const unsigned long buttonTimeOut = 5L * 1000L;         // rebound 5seconds
-const unsigned long controllerInterval = 2L * 5000L;    // delay between sensor updates, 10 seconds
-const unsigned long SaluteTimer = 1L * 30000L;          // Tiempo para enviar que el dispositivo esta conectado,
-const unsigned long wifiReconnectInterval = 1 * 30000L; // 30 segundos para intentar reconectar al wifi.
+unsigned long AutoTimeOut = 0;                           // wati time for moving sensor and setpoint change
+const unsigned long buttonTimeOut = 5L * 1000L;          // rebound 5seconds
+const unsigned long controllerInterval = 2L * 5000L;     // delay between sensor updates, 10 seconds
+const unsigned long SaluteTimer = 1L * 30000L;           // Tiempo para enviar que el dispositivo esta conectado,
+const unsigned long wifiReconnectInterval = 1 * 30000L;  // 30 segundos para intentar reconectar al wifi.
+const unsigned long mqttReconnectInterval = 1L * 10000L; // 10 segundos para intentar reconectar al broker mqtt.
 // MQTT Brokers
 const char *mqtt_broker = "mqtt.tago.io";
 const char *topic = "system/operation/settings";
@@ -62,7 +65,6 @@ const char *topic_3 = "system/operation/setpoint";
 const char *mqtt_username = "Token";
 const char *mqtt_password = "ebc8915c-9510-480b-a7fc-b057586bdf39";
 const int mqtt_port = 1883;
-bool conectado = true;
 bool Envio = false;
 
 // Handler de tareas de lectura de sensores para nucleo 0 o 1
@@ -71,6 +73,7 @@ TaskHandle_t Task1;
 // WIFI VARIABLES
 int i = 0;
 int statusCode;
+int mqttReconnectAttempts = 0;
 const char *ssid = "PHLCONTROLLER";
 const char *passphrase = "12345678";
 String st;
@@ -93,7 +96,6 @@ RTC_DS1307 DS1307_RTC;
 char Week_days[7][12] = {"Domingo", "Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado"};
 
 // Variables de configuracion
-int AutoTimeOut; // debug: this must be unsigned long
 
 String SysState;        // on, off, sleep
 String SysMode;         // auto, fan, cool
@@ -275,7 +277,7 @@ void SaveSpiff(int HON, int HOFF, String Day, bool enable) //[OK]
 }
 
 // Aqui se guardan la configuracion del modo Auto que llega en el topico
-void SpiffSaveAuto(int wait, int temp) //[DEBUG]
+void SpiffSaveAuto(int wait, int temp)
 {
   StaticJsonDocument<32> doc;
   String output;
@@ -305,8 +307,8 @@ void SpiffSaveAuto(int wait, int temp) //[DEBUG]
   }
   f.println(output);
   f.close();
-  AutoTimeOut = wait * 1000; // 1234 -- debug: this must be multiplied by 60_000L to convert minutes into ms
-  AutoTemp = temp;           // 24
+  AutoTimeOut = (unsigned long)wait * 60000L; // convert minutes to miliseconds
+  AutoTemp = temp;                            // 24
 }
 
 // Aqui se guarda el modo que llega desde el topico
@@ -449,8 +451,9 @@ void SetTemps() //[DEBUG]
     return;
   }
 
-  AutoTimeOut = doc["wait"]; // 1234 -- debug: this must be multiplied by 60_000L to convert minutes into ms
-  AutoTemp = doc["temp"];    // 24
+  int wait = doc["wait"];
+  AutoTimeOut = (unsigned long)wait * 60000L;
+  AutoTemp = doc["temp"]; // 24
 
   f.close();
 }
@@ -845,8 +848,8 @@ void EncenderApagar() //[ok]
     digitalWrite(Pin_compresor, LOW);
     delay(250); // delay between relays
     digitalWrite(Pin_vent, LOW);
-    lastCompressorTurnOff = millis(); // update LastCompressorTurnOff value
-    getTime();                        // update RTC Time (if connected with NTP Server.)
+    lastCompressorTurnOff = millis(); // update lastCompressorTurnOff value
+    getTime();                        // update RTC
     Envio = true;
     return;
   }
@@ -862,7 +865,6 @@ void EncenderApagar() //[ok]
     }
     else
     {
-      Serial.println("Waiting compressor timeOut..");
       return; // prevent set Envio to true...
     }
   }
@@ -883,43 +885,62 @@ void EncenderApagar() //[ok]
 void wifiloop() //[ok]
 {
 
+  // only turn hotspot on when the button in D15 is pressed or esid has never been set.
+  if ((digitalRead(15) == 1) || esid == "") // debug: find a better way for esid...
+  {
+    Serial.println("D15 HIGH or esid has never been set");
+    Serial.println("Turning the HotSpot On");
+    launchWeb();
+    setupAP(); // Setup HotSpot
+    Serial.println("Waiting...");
+    while ((WiFi.status() != WL_CONNECTED))
+    {
+      Serial.print(".");
+      delay(500);
+      server.handleClient();
+    }
+    delay(500);
+  }
+
   if ((WiFi.status() == WL_CONNECTED))
   {
-    //    Serial.print("Connected to ");
-    //    Serial.print(esid);
-    //    Serial.println(" Successfully");
-
-    if (conectado == true)
+    // WiFi connected...
+    if ((!client.connected()) && (millis() - lastMqttReconnect >= mqttReconnectInterval))
     {
       // connecting to a mqtt broker
-      while (!client.connected())
+      lastMqttReconnect = millis();
+      String client_id = "esp32-client-";
+      client_id += String(WiFi.macAddress());
+      Serial.printf("Intentando conectar al cliente: %s al broker MQTT\n", client_id.c_str());
+      // Try mqtt connection to the broker.
+      if (client.connect(client_id.c_str(), mqtt_username, mqtt_password, willTopic, willQoS, willRetain, willMessage))
       {
-        String client_id = "esp32-client-";
-        client_id += String(WiFi.macAddress());
-        Serial.printf("Intentando conectar al cliente: %s al broker MQTT\n", client_id.c_str());
-        if (client.connect(client_id.c_str(), mqtt_username, mqtt_password, willTopic, willQoS, willRetain, willMessage))
+        Serial.printf("- Connected with MQTT broker on: %s -\n", mqtt_broker);
+        // Publish and subscribe
+        client.subscribe(topic);
+        delay(1000); // debug: why this?
+        client.subscribe(topic_2);
+        delay(1000); // debug: why this?
+        client.subscribe(topic_3);
+        lastSaluteTime = millis();
+        Salute = false; // flag to send connection message
+        mqttReconnectAttempts = 0;
+      }
+      else
+      {
+        Serial.print("failed MQTT connection with state: ");
+        Serial.println(client.state());
+        mqttReconnectAttempts += 1;
+        if (mqttReconnectAttempts >= 10)
         {
-          Serial.println("TAGO.IO MQTT broker connected");
-        }
-        else
-        {
-          Serial.print("failed mqtt connection with state: ");
-          Serial.println(client.state());
-          delay(250);
+          Serial.println("Disconnecting from the Wifi network after 10 reconnection attempts to the MQTT broker");
+          WiFi.disconnect();
+          lastWifiReconnect = millis();
         }
       }
-      // Publish and subscribe
-      client.subscribe(topic);
-      delay(1000); // debug: why this?
-      client.subscribe(topic_2);
-      delay(1000); // debug: why this?
-      client.subscribe(topic_3);
-      lastSaluteTime = millis();
-      Salute = false; // flag to send connection message
-      conectado = false;
     }
 
-    if (millis() - lastSaluteTime > SaluteTimer && !Salute)
+    if (!Salute && millis() - lastSaluteTime > SaluteTimer)
     {
       client.publish("device/hello", "connected");
       Salute = true;
@@ -929,31 +950,15 @@ void wifiloop() //[ok]
   // WiFi Reconnect
   if ((WiFi.status() != WL_CONNECTED) && (millis() - lastWifiReconnect >= wifiReconnectInterval))
   {
+    // WiFi disconnected
     Serial.println("Device disconnected from WiFi network..");
-    Serial.print("Connection status: ");
+    Serial.print("WiFi connection status: ");
     Serial.println(WiFi.status());
-    Serial.println("Trying to reconnect to WiFi...");
+    Serial.println("Trying connection to WiFi network...");
     WiFi.disconnect();
     WiFi.begin(esid.c_str(), epass.c_str());
     lastWifiReconnect = millis();
-  }
-  // only turn hotspot on when the button in D15 is pressed..
-  if ((digitalRead(15) == 1))
-  {
-    Serial.println("D15 HIGH");
-    Serial.println("Turning the HotSpot On");
-    launchWeb();
-    setupAP(); // Setup HotSpot
-    Serial.println();
-    Serial.println("Waiting.");
-    while ((WiFi.status() != WL_CONNECTED))
-    {
-      Serial.print(".");
-      delay(500);
-      server.handleClient();
-      conectado = true;
-    }
-    delay(500);
+    mqttReconnectAttempts = 0;
   }
 }
 
@@ -995,7 +1000,7 @@ void PowerAC() //[ok]
 // Envio de datos a Tago.io
 void DataMQTTSend() //[ok]
 {
-  if (!Envio || conectado)
+  if (!Envio || !client.connected())
   {
     return;
   }
@@ -1196,10 +1201,6 @@ void setup()
   {
     esid += char(EEPROM.read(i));
   }
-  if (esid == "")
-  {
-    esid = "default-network";
-  }
   Serial.println();
   Serial.print("SSID: ");
   Serial.println(esid);
@@ -1207,10 +1208,6 @@ void setup()
   for (int i = 32; i < 96; ++i)
   {
     epass += char(EEPROM.read(i));
-  }
-  if (epass == "")
-  {
-    epass = "default-pwd";
   }
   Serial.print("PASS: ");
   Serial.println(epass);
@@ -1226,19 +1223,10 @@ void setup()
   getTime();
 }
 
-void MQTTConnected()
-{
-  if (!client.connected())
-  {
-    conectado = true;
-  }
-}
-
 void loop()
 {
   wifiloop();
   client.loop();
-  MQTTConnected();
   delay(10);
 }
 
