@@ -109,8 +109,8 @@ float CurrentSysTemp;
 bool Salute = false;
 bool MovingSensor = false;
 bool schedule_enabled; // Variables de activacion del modo sleep
-double Tc;
-double t;
+double Tc = 22;
+double t = 22;
 
 // NTP
 const char *ntpServer = "pool.ntp.org";
@@ -796,6 +796,11 @@ double Temperature() //[ok]
   sensors.requestTemperatures();
   float temperatureC = sensors.getTempCByIndex(0);
   Serial.println(temperatureC);
+  if (temperatureC == 85 || temperatureC == -127)
+  {
+    Serial.println("Error reading OneWire sensor - [Return Temperature]");
+    return Tc; // return las valid value from Tc variable..
+  }
   return temperatureC;
 }
 
@@ -804,6 +809,11 @@ double AmbTemperature() //[ok]
   sensorAmb.requestTemperatures();
   float temperatureAmbC = sensorAmb.getTempCByIndex(0);
   Serial.println(temperatureAmbC);
+  if (temperatureAmbC == 85 || temperatureAmbC == -127)
+  {
+    Serial.println("Error reading OneWire sensor - [Ambient temperature]");
+    return t; // return las valid value from t variable..
+  }
   return temperatureAmbC;
 }
 
@@ -946,6 +956,7 @@ void wifiloop() //[ok]
       Salute = true;
       Serial.println("MQTT Dispositivo conectado");
     }
+    return;
   }
   // WiFi Reconnect
   if ((WiFi.status() != WL_CONNECTED) && (millis() - lastWifiReconnect >= wifiReconnectInterval))
@@ -959,6 +970,7 @@ void wifiloop() //[ok]
     WiFi.begin(esid.c_str(), epass.c_str());
     lastWifiReconnect = millis();
     mqttReconnectAttempts = 0;
+    return;
   }
 }
 
