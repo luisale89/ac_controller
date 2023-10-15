@@ -73,7 +73,6 @@ TaskHandle_t Task1;
 // WIFI VARIABLES
 int i = 0;
 int statusCode;
-int mqttReconnectAttempts = 0;
 const char *ssid = "PHLCONTROLLER";
 const char *passphrase = "12345678";
 String st;
@@ -399,7 +398,7 @@ void SetEncendido() //[OK]
 }
 
 // Funcion que asigna las temperaturas predeterminadas a las variables globales
-void SetTemps() //[DEBUG]
+void SetTemps()
 {
 
   // Temperatura SetPoint
@@ -421,6 +420,7 @@ void SetTemps() //[DEBUG]
 
   SelectTemp = ReadTemp.toFloat();
   file.close();
+  CurrentSysTemp = SelectTemp;
 
   // Temperatura en Auto
 
@@ -852,6 +852,7 @@ void EncenderApagar() //[ok]
     return;
   }
 
+  // Si el cambio es para apagar el sistema,
   if (SysState == "off" || SysState == "sleep")
   {
     Serial.println("Turning off the system..");
@@ -866,7 +867,7 @@ void EncenderApagar() //[ok]
   // si el cambio es para que el sistema enfríe..
   if (SysFunc == "cooling")
   {
-    digitalWrite(Pin_vent, HIGH);
+    digitalWrite(Pin_vent, HIGH); // Enciende el ventilador..
     if (millis() - lastCompressorTurnOff > CompressorTimeOut)
     {
       Serial.println("Turning on the compressor.. Cooling..");
@@ -934,19 +935,12 @@ void wifiloop() //[ok]
         client.subscribe(topic_3);
         lastSaluteTime = millis();
         Salute = false; // flag to send connection message
-        mqttReconnectAttempts = 0;
       }
       else
       {
         Serial.print("failed MQTT connection with state: ");
         Serial.println(client.state());
-        mqttReconnectAttempts += 1;
-        if (mqttReconnectAttempts >= 10)
-        {
-          Serial.println("Disconnecting from the Wifi network after 10 reconnection attempts to the MQTT broker");
-          WiFi.disconnect();
-          lastWifiReconnect = millis();
-        }
+        return;
       }
     }
 
@@ -954,7 +948,7 @@ void wifiloop() //[ok]
     {
       client.publish("device/hello", "connected");
       Salute = true;
-      Serial.println("MQTT Dispositivo conectado");
+      Serial.println("MQTT Salute message sent");
     }
     return;
   }
@@ -969,7 +963,6 @@ void wifiloop() //[ok]
     WiFi.disconnect();
     WiFi.begin(esid.c_str(), epass.c_str());
     lastWifiReconnect = millis();
-    mqttReconnectAttempts = 0;
     return;
   }
 }
@@ -986,11 +979,13 @@ void PowerAC() //[ok]
     {
       SysState = "off";
       spiffs_save_state();
+      Envio = true;
     }
     else if (SysState == "off")
     {
       SysState = "on";
       spiffs_save_state();
+      Envio = true;
     }
     else if (SysState == "sleep")
     {
