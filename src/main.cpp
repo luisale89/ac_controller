@@ -8,6 +8,8 @@
 #include <ArduinoJson.h>
 // Libreria RTC
 #include "RTClib.h"
+#include "sntp.h"
+#include "time.h"
 
 // Librerias One Wire
 #include <OneWire.h>
@@ -165,6 +167,13 @@ void getTime()
   {
     Serial.println("Could not obtain time info from NTP Server, Skiping RTC update");
   }
+}
+
+void timeavailable(struct timeval *tml)
+{
+  // this should be called every hour automatically..
+  Serial.println("Got time adjustment from NTP! latest datetime is now available");
+  getTime(); // update RTC with latest time from NTP server.
 }
 
 void SaveSettings(bool value, String onCondition, String offCondition) //[OK]
@@ -860,7 +869,6 @@ void EncenderApagar() //[ok]
     delay(250); // delay between relays
     digitalWrite(Pin_vent, LOW);
     lastCompressorTurnOff = millis(); // update lastCompressorTurnOff value
-    getTime();                        // update RTC
     Envio = true;
     return;
   }
@@ -1180,7 +1188,7 @@ void setup()
   SetEncendido();                   // on-off setting
   SetFuncModo();                    // function mode (cool, auto, fan)
   SettingsSetup();                  // timectrl settings
-  lastCompressorTurnOff = millis(); // set now as the last time the compressor was turned off.. prevents blackout starts
+  lastCompressorTurnOff = millis(); // set now as the last time the compressor was turned off.. prevents startup after blackout
   // --- continue
 
   // Crea la tarea de lectura de sensores en el segundo procesador.
@@ -1224,10 +1232,10 @@ void setup()
   client.setBufferSize(mqttBufferSize);
   client.setServer(mqtt_broker, mqtt_port);
   client.setCallback(callback);
-
   // datetime from ntp server
-  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-  getTime();
+  Serial.println("configurando RTC a través del servidor ntp");
+  sntp_set_time_sync_notification_cb(timeavailable);        // sntp sync interval is 1 hour.
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer); // configura tiempo desde el servidor NTP
 }
 
 void loop()
