@@ -29,20 +29,27 @@ const int Pin_compresor = 25; // Y
 const int Pin_vent = 26;      // G
 
 // Variables Sensor temperatura
-const int oneWireBus = 18;
-const int oneWireAmb = 2;
-#define PIN_SENMOV 5
+const int oneWirePipe = 18;
+const int oneWireAmb = 19; // se cambia pin del sensor de temp. ambiente, para evitar errores al subir el código.
+
+// definitions
+#define BROKER_LED 32
+#define NETWORK_LED 33
 #define REMOTE_BUTTON 17
+#define REMOTE_COMP_LED 16
+#define REMOTE_VENT_LED 27
+#define PIN_SENMOV 34 // se cambia pin del sensor de movimiento.
+#define AP_BUTTON 14
 
 // Setup a oneWire instance to communicate with any OneWire devices
-OneWire oneWire(oneWireBus);
+OneWire oneWire(oneWirePipe);
 OneWire oneWireAmbTemp(oneWireAmb);
 
 // Pass our oneWire reference to Dallas Temperature sensor
 DallasTemperature sensors(&oneWire);
 DallasTemperature sensorAmb(&oneWireAmbTemp);
 
-// TAGO.IO VARIABLES
+// Time Variables
 unsigned long lastConnectionTime = 0; // last time a message was sent to the broker, in milliseconds
 unsigned long lastControllerTime = 0;
 unsigned long lastSaluteTime = 0;
@@ -59,7 +66,8 @@ const unsigned long controllerInterval = 2L * 5000L;     // delay between sensor
 const unsigned long SaluteTimer = 1L * 30000L;           // Tiempo para enviar que el dispositivo esta conectado,
 const unsigned long wifiReconnectInterval = 1 * 30000L;  // 30 segundos para intentar reconectar al wifi.
 const unsigned long mqttReconnectInterval = 1L * 10000L; // 10 segundos para intentar reconectar al broker mqtt.
-// MQTT Brokers
+
+// MQTT Broker
 const char *mqtt_broker = "mqtt.tago.io";
 const char *topic = "system/operation/settings";
 const char *topic_2 = "system/operation/state";
@@ -74,7 +82,7 @@ TaskHandle_t Task1;
 
 // WIFI VARIABLES
 int i = 0;
-int statusCode;
+int statusCode = 200;
 const char *ssid = "PHLCONTROLLER";
 const char *passphrase = "12345678";
 String st;
@@ -82,7 +90,6 @@ String content;
 String esid = "";
 String epass = "";
 // Function Decalration
-// bool testWifi(void);
 void launchWeb(void);
 void setupAP(void);
 void createWebServer(void);
@@ -97,10 +104,10 @@ RTC_DS1307 DS1307_RTC;
 char Week_days[7][12] = {"Domingo", "Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado"};
 
 // Variables de configuracion
-
-String SysState;        // on, off, sleep
-String SysMode;         // auto, fan, cool
-String SysFunc = "fan"; // cooling, fan
+String SysState;               // on, off, sleep
+String PrevSysState = "undef"; // on, off, sleep
+String SysMode;                // auto, fan, cool
+String SysFunc = "fan";        // cooling, fan
 String on_condition;
 String off_condition;
 String Sleep = "undef"; // first value for Sleep variable
@@ -596,9 +603,9 @@ void setpoint(String json) //[OK]
 // Funcion que recibe la data de Tago por MQTT
 void callback(char *topicp, byte *payload, unsigned int length) //[OK]
 {
-  Serial.print("Message arrived in topic: ");
+  Serial.print("$ Message arrived in topic: ");
   Serial.println(topicp);
-  Serial.print("Message:");
+  Serial.print("* Message:");
   String Mensaje;
   for (int i = 0; i < length; i++)
   {
@@ -663,7 +670,6 @@ void TempRegulator(float temp) // [OK]
     else if (millis() - MovingSensorTime > AutoTimeOut)
     {
       CurrentSysTemp = AutoTemp;
-      Serial.print("- CurrentSysTemp = AutoTemp- ");
     }
   }
 
@@ -671,7 +677,14 @@ void TempRegulator(float temp) // [OK]
 
   if (temp < CurrentSysTemp - 0.5)
   {
-    SysFunc = "fan";
+    if (CurrentSysTemp == AutoTemp)
+    {
+      SysFunc = "idle";
+    }
+    else
+    {
+      SysFunc = "fan";
+    }
   }
   else if (temp > CurrentSysTemp + 0.5)
   {
@@ -807,7 +820,7 @@ double Temperature() //[ok]
   Serial.println(temperatureC);
   if (temperatureC == 85 || temperatureC == -127)
   {
-    Serial.println("Error reading OneWire sensor - [Return Temperature]");
+    Serial.println("$ Error reading OneWire sensor - [Evaporator Temperature]");
     return Tc; // return las valid value from Tc variable..
   }
   return temperatureC;
@@ -820,7 +833,7 @@ double AmbTemperature() //[ok]
   Serial.println(temperatureAmbC);
   if (temperatureAmbC == 85 || temperatureAmbC == -127)
   {
-    Serial.println("Error reading OneWire sensor - [Ambient temperature]");
+    Serial.println("$ Error reading OneWire sensor - [Ambient temperature]");
     return t; // return las valid value from t variable..
   }
   return temperatureAmbC;
@@ -844,16 +857,27 @@ void EncenderApagar() //[ok]
   {
     YState = true; // update YState
   }
-  // SysFunc == "off || sleep" will get Y and G to false, as default
-  if (SysFunc == "fan" && SysState == "on")
+  // SysState == "off || sleep" will get Y and G to false, as default
+  if (SysState == "on")
   {
-    Y = false;
-    G = true;
-  }
-  else if (SysFunc == "cooling" && SysState == "on")
-  {
-    Y = true;
-    G = true;
+    if (SysFunc == "fan")
+    {
+      // fan only mode
+      Y = false;
+      G = true;
+    }
+    else if (SysFunc == "cooling")
+    {
+      // cooling mode
+      Y = true;
+      G = true;
+    }
+    else if (SysFunc == "idle")
+    {
+      // idle mode
+      Y = false;
+      G = false;
+    }
   }
   // Si no hubo cambio en las salidas..
   if (Y == YState && G == GState)
@@ -862,25 +886,29 @@ void EncenderApagar() //[ok]
   }
 
   // Si el cambio es para apagar el sistema,
-  if (SysState == "off" || SysState == "sleep")
+  if (!Y && !G)
   {
-    Serial.println("Turning off the system..");
-    digitalWrite(Pin_compresor, LOW);
+    Serial.println("* SysUpdate: Turning off the system.. fan and compressor off..");
+    digitalWrite(Pin_compresor, Y);
+    digitalWrite(REMOTE_COMP_LED, Y);
     delay(250); // delay between relays
-    digitalWrite(Pin_vent, LOW);
+    digitalWrite(Pin_vent, G);
+    digitalWrite(REMOTE_VENT_LED, G);
     lastCompressorTurnOff = millis(); // update lastCompressorTurnOff value
     Envio = true;
     return;
   }
   // si el cambio es para que el sistema enfríe..
-  if (SysFunc == "cooling")
+  if (Y && G)
   {
-    digitalWrite(Pin_vent, HIGH); // Enciende el ventilador..
+    digitalWrite(Pin_vent, G); // Enciende el ventilador..
+    digitalWrite(REMOTE_VENT_LED, G);
     if (millis() - lastCompressorTurnOff > CompressorTimeOut)
     {
-      Serial.println("Turning on the compressor.. Cooling..");
-      delay(250);                        // delay between relays
-      digitalWrite(Pin_compresor, HIGH); // aquí se produce el cambio  del YState, y para el próximo loop no entra en esta parte del código..
+      Serial.println("* SysUpdate: Turning on the compressor and the fan.. Cooling mode..");
+      delay(250);                     // delay between relays
+      digitalWrite(Pin_compresor, Y); // aquí se produce el cambio  del YState, y para el próximo loop no entra en esta parte del código..
+      digitalWrite(REMOTE_COMP_LED, Y);
     }
     else
     {
@@ -888,15 +916,17 @@ void EncenderApagar() //[ok]
     }
   }
   // Si el cambio es para que el sistema no enfríe, pero funcione la turbina del evaporador..
-  else if (SysFunc == "fan")
+  else if (!Y && G)
   {
-    digitalWrite(Pin_vent, HIGH);
-    digitalWrite(Pin_compresor, LOW);
+    Serial.println("* SysUpdate: Fan only, compressor turned off..");
+    digitalWrite(Pin_vent, G);
+    digitalWrite(REMOTE_VENT_LED, G);
+    digitalWrite(Pin_compresor, Y);
+    digitalWrite(REMOTE_COMP_LED, Y);
     lastCompressorTurnOff = millis(); // update LastCompressorTurnOff value
   }
-  // Si el cambio es para apagar el sistema..
 
-  Envio = true;
+  Envio = true; // send message to the broker on any state change.
   return;
 }
 
@@ -905,17 +935,20 @@ void wifiloop() //[ok]
 {
 
   // only turn hotspot on when the button in D15 is pressed or esid has never been set.
-  if ((digitalRead(15) == 1) || esid == "") // debug: find a better way for esid...
+  if ((digitalRead(AP_BUTTON) == 0) || esid == "") // debug: find a better way for esid...
   {
-    Serial.println("D15 HIGH or esid has never been set");
-    Serial.println("Turning the HotSpot On");
+    Serial.println("* the AP button has been pressed. - Setting new Network config -");
+    Serial.println("- Turning the HotSpot On");
     launchWeb();
     setupAP(); // Setup HotSpot
-    Serial.println("Waiting...");
+    Serial.println("- Waiting...");
     while ((WiFi.status() != WL_CONNECTED))
     {
       Serial.print(".");
-      delay(500);
+      digitalWrite(NETWORK_LED, HIGH);
+      delay(250);
+      digitalWrite(NETWORK_LED, LOW);
+      delay(250);
       server.handleClient();
     }
     delay(500);
@@ -924,29 +957,38 @@ void wifiloop() //[ok]
   if ((WiFi.status() == WL_CONNECTED))
   {
     // WiFi connected...
+    digitalWrite(NETWORK_LED, HIGH);
+    digitalWrite(BROKER_LED, client.connected());
+
     if ((!client.connected()) && (millis() - lastMqttReconnect >= mqttReconnectInterval))
     {
       // connecting to a mqtt broker
+      Serial.println("* MQTT broker connection attempt..");
       lastMqttReconnect = millis();
       String client_id = "esp32-client-";
       client_id += String(WiFi.macAddress());
-      Serial.printf("Intentando conectar al cliente: %s al broker MQTT\n", client_id.c_str());
+      Serial.printf("- client-id: %s\n", client_id.c_str());
       // Try mqtt connection to the broker.
       if (client.connect(client_id.c_str(), mqtt_username, mqtt_password, willTopic, willQoS, willRetain, willMessage))
       {
-        Serial.printf("- Connected with MQTT broker on: %s -\n", mqtt_broker);
+        Serial.printf("- Connected to MQTT broker: %s\n", mqtt_broker);
         // Publish and subscribe
+        Serial.println("- Subscribing to mqtt topics:");
         client.subscribe(topic);
-        delay(1000); // debug: why this?
+        Serial.println("# Topic 1 ok");
+        delay(1000);
         client.subscribe(topic_2);
-        delay(1000); // debug: why this?
+        Serial.println("# Topic 2 ok");
+        delay(1000);
         client.subscribe(topic_3);
+        Serial.println("# Topic 3 ok");
         lastSaluteTime = millis();
         Salute = false; // flag to send connection message
+        Serial.println("** MQTT settings done. **");
       }
       else
       {
-        Serial.print("failed MQTT connection with state: ");
+        Serial.print("- Failed MQTT connection with state: ");
         Serial.println(client.state());
         return;
       }
@@ -956,11 +998,13 @@ void wifiloop() //[ok]
     {
       client.publish("device/hello", "connected");
       Salute = true;
-      Serial.println("MQTT Salute message sent");
+      Serial.println("** MQTT \"Salute\" message sent");
     }
     return;
   }
   // WiFi Reconnect
+  digitalWrite(NETWORK_LED, LOW);
+  digitalWrite(BROKER_LED, LOW);
   if ((WiFi.status() != WL_CONNECTED) && (millis() - lastWifiReconnect >= wifiReconnectInterval))
   {
     // WiFi disconnected
@@ -980,17 +1024,19 @@ void PowerAC() //[ok]
 {
   // Apaga o enciende el aire depediendo del estado
 
-  if (digitalRead(REMOTE_BUTTON) && millis() - lastButtonPress > buttonTimeOut)
+  if (digitalRead(REMOTE_BUTTON) == 0 && millis() - lastButtonPress > buttonTimeOut)
   {
-    Serial.println("Remote Button pressed..");
+    Serial.println("* Remote Button has been pressed..");
     if (SysState == "on")
     {
+      Serial.println("- Turning off the system.");
       SysState = "off";
       spiffs_save_state();
       Envio = true;
     }
     else if (SysState == "off")
     {
+      Serial.println("- Turning on the system.");
       SysState = "on";
       spiffs_save_state();
       Envio = true;
@@ -999,17 +1045,31 @@ void PowerAC() //[ok]
     {
       // on Sleep State, the user can't change the System State with the local button..
       // block State change and notify to the user with blinking led.
+      Serial.println("- System is in Sleep mode, remote button has no effect.");
       for (int i = 0; i <= 2; i++) // three times
       {
-        digitalWrite(16, HIGH);
+        digitalWrite(REMOTE_VENT_LED, HIGH);
         delay(125);
-        digitalWrite(16, LOW);
+        digitalWrite(REMOTE_VENT_LED, LOW);
         delay(125);
       }
     }
-
     lastButtonPress = millis();
   }
+}
+
+void NotifyStateChange()
+{
+  if (PrevSysState == SysState)
+  {
+    return;
+  }
+  Serial.println("* Sending MQTT notification for SysState update..");
+  bool message_sent = client.publish("device/state", SysState.c_str());
+  Serial.print("- MQTT message sent: ");
+  Serial.println(message_sent);
+  PrevSysState = SysState; // assign PrevSysState the current SysState
+  return;
 }
 
 // Envio de datos a Tago.io
@@ -1064,21 +1124,24 @@ void DataMQTTSend() //[ok]
   metadata["timectrl"] = timectrl;
 
   serializeJson(doc, output);
+  Serial.println("* Sending msg to mqtt broker:");
   Serial.println(output);
   // Serial.println(output);
   bool mqtt_msg_sent = client.publish("tago/data/post", output.c_str());
-  Serial.print("MQTT publish result: ");
+  Serial.print("- MQTT publish result: ");
   Serial.println(mqtt_msg_sent);
 
-  // update postingInterval, lower if the system is on
+  // notify tago the state update...
+  NotifyStateChange();
 
+  // update postingInterval, lower if the system is on
   if (SysState == "on")
   {
     postingInterval = 2L * 30000L; // 1 minuto.
   }
   else
   {
-    postingInterval = 3L * 60000L; // 3 minutos.
+    postingInterval = 5L * 60000L; // 5 minutos.
   }
 
   Envio = false;
@@ -1127,16 +1190,6 @@ void SensorsRead(void *pvParameters)
     // Check if the remote button is pressed
     PowerAC();
 
-    // user feedback
-    if (SysState == "on")
-    {
-      digitalWrite(16, HIGH); // remote board led on..
-    }
-    else
-    {
-      digitalWrite(16, LOW); // remote board led off...
-    }
-
     // flag to send data to tago.io
     if (millis() - lastConnectionTime > postingInterval)
     {
@@ -1154,44 +1207,57 @@ void setup()
 {
   Serial.begin(115200);
   // pins definition
-  pinMode(15, INPUT);             // Wifi Restart
-  pinMode(PIN_SENMOV, INPUT);     // sensor de presencia
-  pinMode(REMOTE_BUTTON, INPUT);  // remote board button.
-  pinMode(16, OUTPUT);            // remote board led.
-  pinMode(Pin_compresor, OUTPUT); // Compresor
-  pinMode(Pin_vent, OUTPUT);      // Ventilador
+  Serial.println("** Hello!, System setup started... **");
+  pinMode(BROKER_LED, OUTPUT);          // broker connection led.
+  pinMode(NETWORK_LED, OUTPUT);         // network connection led.
+  pinMode(REMOTE_BUTTON, INPUT_PULLUP); // remote board button.
+  pinMode(REMOTE_COMP_LED, OUTPUT);     // remote comp led.
+  pinMode(REMOTE_VENT_LED, OUTPUT);     // remote vent led.
+  pinMode(PIN_SENMOV, INPUT_PULLDOWN);  // sensor de presencia
+  pinMode(AP_BUTTON, INPUT);            // Wifi Restart and configuration.
+  pinMode(Pin_compresor, OUTPUT);       // Compresor
+  pinMode(Pin_vent, OUTPUT);            // Ventilador
 
 #ifndef ESP32
   while (!Serial)
     ; // wait for serial port to connect. Needed for native USB
 #endif
 
+  Serial.println("* RTC start on I2C bus..");
   if (!DS1307_RTC.begin())
   {
-    Serial.println("Couldn't find RTC");
+    Serial.println("$ Couldn't find RTC, please reboot.");
     while (1)
       ;
   }
-
-  // // Boton de interrupcion
-  // Interrupción está causando problemas... se reinicia la placa (Luis Lucena)
-  // attachInterrupt(17, PowerAC, HIGH);
+  if (!DS1307_RTC.isrunning())
+  {
+    Serial.println("- RTC is NOT running!, setting up sketch compiled datetime.");
+    // following line sets the RTC to the date & time this sketch was compiled
+    DS1307_RTC.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  }
+  Serial.println("- RTC ok.");
 
   // Inicio Sensores OneWire
+  Serial.println("* OneWire sensors inisialization");
   sensors.begin();
   delay(1000);
   sensorAmb.begin();
   delay(1000);
+  Serial.println("- OneWire sensors ok.");
 
   // set default values from .txt files
-  SetTemps();                       // user-temp and auto-temp
-  SetEncendido();                   // on-off setting
-  SetFuncModo();                    // function mode (cool, auto, fan)
-  SettingsSetup();                  // timectrl settings
+  Serial.println("* Reading stored values from file system. (SPIFF)");
+  SetTemps();      // user-temp and auto-temp
+  SetEncendido();  // on-off setting
+  SetFuncModo();   // function mode (cool, auto, fan)
+  SettingsSetup(); // timectrl settings
+  Serial.println("- SPIFF system ok.");
   lastCompressorTurnOff = millis(); // set now as the last time the compressor was turned off.. prevents startup after blackout
   // --- continue
 
   // Crea la tarea de lectura de sensores en el segundo procesador.
+  Serial.println("* Creating 2nd core task...");
   xTaskCreatePinnedToCore(
       SensorsRead, /* Function to implement the task */
       "Task1",     /* Name of the task */
@@ -1200,42 +1266,46 @@ void setup()
       0,           /* Priority of the task */
       &Task1,      /* Task handle. */
       0);
+  Serial.println("- Task created.");
 
   // WifiSettings
-  Serial.println("Disconnecting current wifi connection");
+  Serial.println("* Disconnecting from any existing wifi network");
   WiFi.disconnect();
   EEPROM.begin(512); // Initialasing EEPROM
   delay(10);
   //
-  Serial.println();
-  Serial.println();
-  Serial.println("Startup");
+  Serial.println("#");
+  Serial.println("#");
   //---------------------------------------- Read eeprom for ssid and pass
-  Serial.println("Reading EEPROM ssid");
+  Serial.println("* Reading EEPROM ssid");
   for (int i = 0; i < 32; ++i)
   {
     esid += char(EEPROM.read(i));
   }
   Serial.println();
-  Serial.print("SSID: ");
+  Serial.print("- SSID: ");
   Serial.println(esid);
-  Serial.println("Reading EEPROM pass");
+  Serial.println("* Reading EEPROM pass");
   for (int i = 32; i < 96; ++i)
   {
     epass += char(EEPROM.read(i));
   }
-  Serial.print("PASS: ");
+  Serial.print("- PASS: ");
   Serial.println(epass);
   //--- wifi connection
+  Serial.println("* Attempting wifi connection.");
   WiFi.begin(esid.c_str(), epass.c_str());
   //--- mqtt settings ---
   client.setBufferSize(mqttBufferSize);
   client.setServer(mqtt_broker, mqtt_port);
   client.setCallback(callback);
   // datetime from ntp server
-  Serial.println("configurando RTC a través del servidor ntp");
+  Serial.println("* creating NTP server configuration.");
   sntp_set_time_sync_notification_cb(timeavailable);        // sntp sync interval is 1 hour.
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer); // configura tiempo desde el servidor NTP
+
+  // --- end of setup ---
+  Serial.println("** Setup completed **");
 }
 
 void loop()
@@ -1246,24 +1316,6 @@ void loop()
 }
 
 //-----------------------------------------------Funciones para conexion Wifi, guardar credenciales y conectar, no hay que cambiar
-// bool testWifi(void)
-// {
-//   int c = 0;
-//   // Serial.println("Waiting for Wifi to connect");
-//   while (c < 20)
-//   {
-//     if (WiFi.status() == WL_CONNECTED)
-//     {
-//       return true;
-//     }
-//     delay(500);
-//     Serial.print("*");
-//     c++;
-//   }
-//   Serial.println("");
-//   Serial.println("Wifi connection timed out,");
-//   return false;
-// }
 void launchWeb()
 {
   Serial.println("");
@@ -1319,7 +1371,7 @@ void setupAP(void)
   }
   st += "</ol>";
   delay(100);
-  WiFi.softAP("PHLCONTROLLER", "12345678");
+  WiFi.softAP("HVAC-CONTROLLER", "climatio");
   Serial.println("Initializing_softap_for_wifi credentials_modification");
   launchWeb();
   Serial.println("over");
@@ -1349,6 +1401,8 @@ void createWebServer()
       server.send(200, "text/html", content); });
     server.on("/setting", []()
               {
+      IPAddress ip = WiFi.softAPIP();
+      String ipStr = String(ip[0]) + '.' + String(ip[1]) + '.' + String(ip[2]) + '.' + String(ip[3]);
       String qsid = server.arg("ssid");
       String qpass = server.arg("pass");
       if (qsid.length() > 0 && qpass.length() > 0) {
@@ -1375,15 +1429,19 @@ void createWebServer()
           Serial.println(qpass[i]);
         }
         EEPROM.commit();
-        content = "{\"Success\":\"saved to eeprom... reset to boot into new wifi\"}";
+        content = "<!DOCTYPE HTML>\r\n<html><h3>Success.. Saved SSID and PW in eeprom.. reboot to continue.</h3>";
+        content += "<form action=\"/reboot\"><input type=\"submit\" value=\"Reboot board...\"/></form></html>";
         statusCode = 200;
-        ESP.restart();
       } else {
-        content = "{\"Error\":\"404 not found\"}";
-        statusCode = 404;
-        Serial.println("Sending 404");
+        content = "<!DOCTYPE HTML>\r\n<html><h3>Error.. invalid SSID or Password.</h3>";
+        content += "<button onclick=\"history.back()\">Go back</button></html>";
+        statusCode = 400;
+        Serial.println("Sending 400");
       }
-      server.sendHeader("Access-Control-Allow-Origin", "*");
-      server.send(statusCode, "application/json", content); });
+      server.send(statusCode, "text/html", content); });
+    server.on("/reboot", []()
+              {
+                Serial.println("Reboot in progress...");
+                ESP.restart(); });
   }
 }
