@@ -37,7 +37,7 @@ const int oneWireAmb = 19; // se cambia pin del sensor de temp. ambiente, para e
 #define NETWORK_LED 33
 #define REMOTE_BUTTON 17
 #define REMOTE_COMP_LED 16
-#define REMOTE_VENT_LED 27
+#define REMOTE_STATE_LED 27
 #define PIN_SENMOV 34 // se cambia pin del sensor de movimiento.
 #define AP_BUTTON 14
 
@@ -57,7 +57,7 @@ unsigned long lastButtonPress = 0;
 unsigned long lastCompressorTurnOff = 0;
 unsigned long lastWifiReconnect = 0;
 unsigned long lastMqttReconnect = 0;
-unsigned long postingInterval = 2L * 30000L;   // delay between updates, in milliseconds.. 1 minute || 60_000 ms
+unsigned long postingInterval = 5L * 60000L;   // delay between updates, in milliseconds.. 5 minutes
 unsigned long CompressorTimeOut = 4L * 30000L; // 2 minutos de retardo para habilitar el compresor..
 unsigned long MovingSensorTime = 0;
 unsigned long AutoTimeOut = 0;                           // wati time for moving sensor and setpoint change
@@ -648,33 +648,30 @@ void callback(char *topicp, byte *payload, unsigned int length) //[OK]
 // Funcion que regula la temperatura
 void TempRegulator(float temp) // [OK]
 {
+  // [bug] system does not responds on setpoint change when auto mode is set.
+  //  SelectTemp by default.
+  CurrentSysTemp = SelectTemp; // Use SelectTemp as default.
 
   if (SysMode == "fan")
   {
-    CurrentSysTemp = SelectTemp;
     SysFunc = "fan";
     return;
   }
-
-  if (SysMode == "cool")
-  {
-    CurrentSysTemp = SelectTemp;
-  }
-  else if (SysMode == "auto")
+  // condition to modify CurrentSysTemp.
+  if (SysMode == "auto")
   {
     if (MovingSensor)
     {
       MovingSensorTime = millis();
-      CurrentSysTemp = SelectTemp;
     }
     else if (millis() - MovingSensorTime > AutoTimeOut)
     {
+      // modify CurrentSysTemp to AutoTemp when AutoTimeOut is reached.
       CurrentSysTemp = AutoTemp;
     }
   }
 
   // control de las salidas en func. de la temperatura
-
   if (temp < CurrentSysTemp - 0.5)
   {
     if (CurrentSysTemp == AutoTemp)
@@ -888,12 +885,11 @@ void EncenderApagar() //[ok]
   // Si el cambio es para apagar el sistema,
   if (!Y && !G)
   {
-    Serial.println("* SysUpdate: Turning off the system.. fan and compressor off..");
+    Serial.println("* SysUpdate: Turning off the fan and compressor..");
     digitalWrite(Pin_compresor, Y);
     digitalWrite(REMOTE_COMP_LED, Y);
     delay(250); // delay between relays
     digitalWrite(Pin_vent, G);
-    digitalWrite(REMOTE_VENT_LED, G);
     lastCompressorTurnOff = millis(); // update lastCompressorTurnOff value
     Envio = true;
     return;
@@ -902,7 +898,6 @@ void EncenderApagar() //[ok]
   if (Y && G)
   {
     digitalWrite(Pin_vent, G); // Enciende el ventilador..
-    digitalWrite(REMOTE_VENT_LED, G);
     if (millis() - lastCompressorTurnOff > CompressorTimeOut)
     {
       Serial.println("* SysUpdate: Turning on the compressor and the fan.. Cooling mode..");
@@ -920,7 +915,6 @@ void EncenderApagar() //[ok]
   {
     Serial.println("* SysUpdate: Fan only, compressor turned off..");
     digitalWrite(Pin_vent, G);
-    digitalWrite(REMOTE_VENT_LED, G);
     digitalWrite(Pin_compresor, Y);
     digitalWrite(REMOTE_COMP_LED, Y);
     lastCompressorTurnOff = millis(); // update LastCompressorTurnOff value
@@ -1048,9 +1042,9 @@ void PowerAC() //[ok]
       Serial.println("- System is in Sleep mode, remote button has no effect.");
       for (int i = 0; i <= 2; i++) // three times
       {
-        digitalWrite(REMOTE_VENT_LED, HIGH);
+        digitalWrite(REMOTE_STATE_LED, HIGH);
         delay(125);
-        digitalWrite(REMOTE_VENT_LED, LOW);
+        digitalWrite(REMOTE_STATE_LED, LOW);
         delay(125);
       }
     }
@@ -1064,9 +1058,21 @@ void NotifyStateChange()
   {
     return;
   }
+  String pass = mqtt_password;
+  // String message = "{\"variable\":\"sys_state_update\",\"value\":\"";
+  // message += SysState;
+  // message += "\",\"metadata\":{\"pw\":\"";
+  // message += pass;
+  // message += "\"}}";
+  String message = SysState;
+  message += ",";
+  message += pass;
+  message += ",";
+  message += PrevSysState;
   Serial.println("* Sending MQTT notification for SysState update..");
-  bool message_sent = client.publish("device/state", SysState.c_str());
-  Serial.print("- MQTT message sent: ");
+  // sending message.
+  bool message_sent = client.publish("device/stateNotification", message.c_str());
+  Serial.print("- MQTT publish result: ");
   Serial.println(message_sent);
   PrevSysState = SysState; // assign PrevSysState the current SysState
   return;
@@ -1131,18 +1137,18 @@ void DataMQTTSend() //[ok]
   Serial.print("- MQTT publish result: ");
   Serial.println(mqtt_msg_sent);
 
-  // notify tago the state update...
+  // notify the user about state update...
   NotifyStateChange();
 
-  // update postingInterval, lower if the system is on
-  if (SysState == "on")
-  {
-    postingInterval = 2L * 30000L; // 1 minuto.
-  }
-  else
-  {
-    postingInterval = 5L * 60000L; // 5 minutos.
-  }
+  // // update postingInterval, lower if the system is on
+  // if (SysState == "on")
+  // {
+  //   postingInterval = 2L * 30000L; // 1 minuto.
+  // }
+  // else
+  // {
+  //   postingInterval = 5L * 60000L; // 5 minutos.
+  // }
 
   Envio = false;
   lastConnectionTime = millis();
@@ -1196,9 +1202,14 @@ void SensorsRead(void *pvParameters)
       Envio = true;
     }
 
+    // remote board led feedback...
+    digitalWrite(REMOTE_STATE_LED, SysState == "on");
+
     // update outputs and send data to broker.
     EncenderApagar();
     DataMQTTSend();
+
+    // task delay
     vTaskDelay(xDelay);
   }
 }
@@ -1212,7 +1223,7 @@ void setup()
   pinMode(NETWORK_LED, OUTPUT);         // network connection led.
   pinMode(REMOTE_BUTTON, INPUT_PULLUP); // remote board button.
   pinMode(REMOTE_COMP_LED, OUTPUT);     // remote comp led.
-  pinMode(REMOTE_VENT_LED, OUTPUT);     // remote vent led.
+  pinMode(REMOTE_STATE_LED, OUTPUT);    // remote state feedback led.
   pinMode(PIN_SENMOV, INPUT_PULLDOWN);  // sensor de presencia
   pinMode(AP_BUTTON, INPUT);            // Wifi Restart and configuration.
   pinMode(Pin_compresor, OUTPUT);       // Compresor
