@@ -27,14 +27,16 @@ uint16_t mqttBufferSize = 512; // LuisLucena, bufferSize in bytes
 // Variables
 const int Pin_compresor = 25; // Y
 const int Pin_vent = 26;      // G
+int network_led_state = LOW;
+int ap_button_state = HIGH;
 
 // Variables Sensor temperatura
 const int oneWirePipe = 18;
 const int oneWireAmb = 19; // se cambia pin del sensor de temp. ambiente, para evitar errores al subir el código.
 
 // definitions
-#define BROKER_LED 32
-#define NETWORK_LED 33
+// #define BROKER_LED 32
+#define NETWORK_LED 32
 #define REMOTE_BUTTON 17
 #define REMOTE_COMP_LED 16
 #define REMOTE_STATE_LED 27
@@ -57,6 +59,8 @@ unsigned long lastButtonPress = 0;
 unsigned long lastCompressorTurnOff = 0;
 unsigned long lastWifiReconnect = 0;
 unsigned long lastMqttReconnect = 0;
+unsigned long lastNetworkLedBlink = 0;
+unsigned long lastApButtonDebounce = 0;
 unsigned long postingInterval = 5L * 60000L;   // delay between updates, in milliseconds.. 5 minutes
 unsigned long CompressorTimeOut = 4L * 30000L; // 2 minutos de retardo para habilitar el compresor..
 unsigned long MovingSensorTime = 0;
@@ -66,6 +70,8 @@ const unsigned long controllerInterval = 2L * 5000L;     // delay between sensor
 const unsigned long SaluteTimer = 1L * 30000L;           // Tiempo para enviar que el dispositivo esta conectado,
 const unsigned long wifiReconnectInterval = 1 * 30000L;  // 30 segundos para intentar reconectar al wifi.
 const unsigned long mqttReconnectInterval = 1L * 10000L; // 10 segundos para intentar reconectar al broker mqtt.
+const unsigned long wifiDisconnectedLedInterval = 250;        // 250 ms
+const unsigned long ApButtonDebounceInterval = 3000;           // 3 seconds pressed
 
 // MQTT Broker
 const char *mqtt_broker = "mqtt.tago.io";
@@ -83,21 +89,12 @@ TaskHandle_t Task1;
 // WIFI VARIABLES
 int i = 0;
 int statusCode = 200;
-const char *ssid = "PHLCONTROLLER";
-const char *passphrase = "12345678";
 String st;
 String content;
 String esid = "";
 String epass = "";
-// Function Decalration
-void launchWeb(void);
-void setupAP(void);
-void createWebServer(void);
-// Establishing Local server at port 80
-WebServer server(80);
-// Initialize the Wifi client library
 WiFiClient espClient;
-PubSubClient client(espClient);
+PubSubClient mqtt_client(espClient);
 
 // RTC
 RTC_DS1307 DS1307_RTC;
@@ -125,8 +122,8 @@ const char *ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = -4 * 3600;
 const int daylightOffset_sec = 0;
 
-// Guarda el estado del sistema
-void spiffs_save_state() //[OK]
+// Guarda el estado del sistema en spiffs
+void save_operation_state_in_fs() //[OK]
 {
 
   if (!SPIFFS.begin(true))
@@ -153,8 +150,8 @@ void spiffs_save_state() //[OK]
   f.close();
 }
 
-// unsigned long getTime() {
-void getTime()
+// update rtc with time from ntp server {
+void update_rtc_from_ntp()
 {
   struct tm timeinfo;
   if (getLocalTime(&timeinfo))
@@ -180,10 +177,10 @@ void timeavailable(struct timeval *tml)
 {
   // this should be called every hour automatically..
   Serial.println("Got time adjustment from NTP! latest datetime is now available");
-  getTime(); // update RTC with latest time from NTP server.
+  update_rtc_from_ntp(); // update RTC with latest time from NTP server.
 }
 
-void SaveSettings(bool value, String onCondition, String offCondition) //[OK]
+void save_timectrl_settings_in_fs(bool value, String onCondition, String offCondition) //[OK]
 {
   String json;
   StaticJsonDocument<96> doc;
@@ -217,7 +214,7 @@ void SaveSettings(bool value, String onCondition, String offCondition) //[OK]
   f.close();
 }
 
-void SettingsSetup() //[OK]
+void load_timectrl_settings_from_fs() //[OK]
 {
   if (!SPIFFS.begin(true))
   {
@@ -256,7 +253,7 @@ void SettingsSetup() //[OK]
 }
 
 // Guarda el horario de apgado de cada dia
-void SaveSpiff(int HON, int HOFF, String Day, bool enable) //[OK]
+void save_schedule_in_fs(int HON, int HOFF, String Day, bool enable) //[OK]
 {
 
   String Hours;
@@ -292,7 +289,7 @@ void SaveSpiff(int HON, int HOFF, String Day, bool enable) //[OK]
 }
 
 // Aqui se guardan la configuracion del modo Auto que llega en el topico
-void SpiffSaveAuto(int wait, int temp)
+void save_auto_config_in_fs(int wait, int temp)
 {
   StaticJsonDocument<32> doc;
   String output;
@@ -327,7 +324,7 @@ void SpiffSaveAuto(int wait, int temp)
 }
 
 // Aqui se guarda el modo que llega desde el topico
-void SpiffSaveModo(String Modo) //[OK]
+void save_operation_mode_in_fs(String Modo) //[OK]
 {
   if (!SPIFFS.begin(true))
   {
@@ -354,7 +351,7 @@ void SpiffSaveModo(String Modo) //[OK]
 }
 
 // Lee la variable de encendio o apadado de tago
-void set_sys_state(String json) //[NEW, OK]
+void process_op_state_from_broker(String json) //[NEW, OK]
 {
   // String input;
 
@@ -378,11 +375,11 @@ void set_sys_state(String json) //[NEW, OK]
   {
     Serial.println("Error: invalid value received from broker on -system_state-");
   }
-  spiffs_save_state();
+  save_operation_state_in_fs();
 }
 
 // Establece el encendido o apagado al inicio
-void SetEncendido() //[OK]
+void load_operation_state_from_fs() //[OK]
 {
   if (!SPIFFS.begin(true))
   {
@@ -414,7 +411,7 @@ void SetEncendido() //[OK]
 }
 
 // Funcion que asigna las temperaturas predeterminadas a las variables globales
-void SetTemps()
+void load_temp_setpoint_from_fs()
 {
 
   // Temperatura SetPoint
@@ -475,7 +472,7 @@ void SetTemps()
 }
 
 // Funcion que asigna el Modo almacenado a una variable local [x]
-void SetFuncModo() //[OK]
+void load_operation_mode_from_fs() //[OK]
 {
   // Temperatura SetPoint
   if (!SPIFFS.begin(true))
@@ -499,7 +496,7 @@ void SetFuncModo() //[OK]
 }
 
 // Guarda la configuracion que se envia en el topico
-void Settings(String json) //[OK]
+void process_settings_from_broker(String json) //[OK]
 {
 
   StaticJsonDocument<768> doc;
@@ -524,9 +521,9 @@ void Settings(String json) //[OK]
     bool value = doc["enabled"];                //
     String onCondition = doc["on_condition"];   //
     String offCondition = doc["off_condition"]; //
-    SaveSettings(value, onCondition, offCondition);
+    save_timectrl_settings_in_fs(value, onCondition, offCondition);
     delay(500);
-    SettingsSetup();
+    load_timectrl_settings_from_fs();
 
     for (JsonPair schedule_item : doc["schedule"].as<JsonObject>())
     {
@@ -539,7 +536,7 @@ void Settings(String json) //[OK]
       bool schedule_item_value_enabled = schedule_item.value()["enabled"]; // true
       Serial.println(Day);
       // String input;, false, true, true, true, ...
-      SaveSpiff(schedule_item_value_on, schedule_item_value_off, Day, schedule_item_value_enabled);
+      save_schedule_in_fs(schedule_item_value_on, schedule_item_value_off, Day, schedule_item_value_enabled);
     }
   }
   else if (String(variable) == "mode_config")
@@ -548,18 +545,18 @@ void Settings(String json) //[OK]
     const char *value = doc["value"]; // "auto"
     int wait = doc["wait"];           // 1234
     int temp = doc["temp"];           // 24
-    SpiffSaveAuto(wait, temp);
+    save_auto_config_in_fs(wait, temp);
   }
   else if (String(variable) == "system_mode")
   {
     // Cambia el modo de operacion
     String value = doc["value"]; // "cool"
-    SpiffSaveModo(value);
+    save_operation_mode_in_fs(value);
   }
 }
 
 // Guarda el Setpoint en SPIFF
-void setpoint(String json) //[OK]
+void process_temp_sp_from_broker(String json) //[OK]
 {
 
   StaticJsonDocument<96> doc;
@@ -601,8 +598,9 @@ void setpoint(String json) //[OK]
 }
 
 // Funcion que recibe la data de Tago por MQTT
-void callback(char *topicp, byte *payload, unsigned int length) //[OK]
+void mqtt_message_callback(char *topicp, byte *payload, unsigned int length) //[OK]
 {
+  digitalWrite(NETWORK_LED, LOW);
   Serial.print("$ Message arrived in topic: ");
   Serial.println(topicp);
   Serial.print("* Message:");
@@ -621,19 +619,19 @@ void callback(char *topicp, byte *payload, unsigned int length) //[OK]
   {
     // Cambia la configuracion del sistema
     Serial.println("-Settings-");
-    Settings(Mensaje);
+    process_settings_from_broker(Mensaje);
   }
   else if (String(topicp) == "system/operation/state")
   {
     // Apaga o enciende el sistema
     Serial.println("-System State-");
-    set_sys_state(Mensaje);
+    process_op_state_from_broker(Mensaje);
   }
   else if (String(topicp) == "system/operation/setpoint")
   {
     // Ajusta la temperatura del ambiente
     Serial.println("-Setpoint-");
-    setpoint(Mensaje);
+    process_temp_sp_from_broker(Mensaje);
   }
 
   Serial.println();
@@ -643,10 +641,11 @@ void callback(char *topicp, byte *payload, unsigned int length) //[OK]
   // Levanta el Flag para envio de datos
   delay(100);
   Envio = true;
+  digitalWrite(NETWORK_LED, HIGH);
 }
 
 // Funcion que regula la temperatura
-void TempRegulator(float temp) // [OK]
+void temp_controller(float temp) // [OK]
 {
   // [bug] system does not responds on setpoint change when auto mode is set.
   //  SelectTemp by default.
@@ -691,9 +690,8 @@ void TempRegulator(float temp) // [OK]
   return;
 }
 
-// Funcion que apaga el aire segun la hora
-// Guardar el dia en una varibale local y compararlo con el RTC, y cuando sean diferentes guardar el horario de este dia
-void AutoOn() //[OK]
+//funcion que ajusta el estado del sistema en funcion del horario y otros parametros.
+void system_state_controller() //[OK]
 {
 
   if (!schedule_enabled)
@@ -781,7 +779,7 @@ void AutoOn() //[OK]
       {
         Serial.println("New [variable] Sleep: " + String(Sleep));
         SysState = "on";
-        spiffs_save_state();
+        save_operation_state_in_fs();
       }
     }
   }
@@ -803,14 +801,15 @@ void AutoOn() //[OK]
       {
         Serial.println("New [variable] Sleep: " + String(Sleep));
         SysState = "sleep";
-        spiffs_save_state();
+        save_operation_state_in_fs();
       }
     }
   }
   return;
 }
+
 // Lee temperatura
-double Temperature() //[ok]
+double read_vapor_temp_from_sensor() //[ok]
 {
   sensors.requestTemperatures();
   float temperatureC = sensors.getTempCByIndex(0);
@@ -823,7 +822,7 @@ double Temperature() //[ok]
   return temperatureC;
 }
 
-double AmbTemperature() //[ok]
+double read_amb_temp_from_sensor() //[ok]
 {
   sensorAmb.requestTemperatures();
   float temperatureAmbC = sensorAmb.getTempCByIndex(0);
@@ -837,7 +836,7 @@ double AmbTemperature() //[ok]
 }
 
 // Enciende o apaga las salidas a relé
-void EncenderApagar() //[ok]
+void update_relay_outputs() //[ok]
 {
   bool YState = false;
   bool GState = false;
@@ -924,57 +923,141 @@ void EncenderApagar() //[ok]
   return;
 }
 
+// carga los datos de la red wifi desde el spiffs.
+void load_wifi_data_from_fs()
+{
+  if (!SPIFFS.begin(true))
+  {
+    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
+    return;
+  }
+
+  File f = SPIFFS.open("/WiFi.txt");
+
+  // Mensaje de fallo al leer el contenido
+  if (!f)
+  {
+    Serial.println("Error al abrir el archivo.");
+    return;
+  }
+  String wifi_data = f.readString();
+  // String input;
+
+  StaticJsonDocument<128> doc1;
+  DeserializationError error = deserializeJson(doc1, wifi_data);
+
+  if (error)
+  {
+    Serial.print("deserializeJson() failed: ");
+    Serial.println(error.c_str());
+    return;
+  }
+
+  String ESID = doc1["ssid"];
+  String PW = doc1["pass"];
+
+  esid = ESID;
+  epass = PW;
+  f.close();
+  return;
+}
+
+// guarda la configuración wifi recibida por smartConfig
+void save_wifi_data_in_fs()
+{
+  StaticJsonDocument<128> doc;
+  String output;
+
+  doc["ssid"] = WiFi.SSID();
+  doc["pass"] = WiFi.psk();
+
+  Serial.println("-> Saving WiFi data in spiffs: ");
+
+  serializeJson(doc, output);
+  if (!SPIFFS.begin(true))
+  {
+    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
+    return;
+  }
+  File f = SPIFFS.open("/WiFi.txt", "w"); // Borra el contenido anterior del archivo
+
+  // Mensaje de fallo al leer el contenido
+  if (!f)
+  {
+    Serial.println("Archivo no existe, debe crearlo...");
+    delay(200);
+    return;
+  }
+  f.println(output);
+  f.close();
+  return;
+}
+
 // Este loop verifica que el wifi este conectado correctamente
 void wifiloop() //[ok]
 {
-
-  // only turn hotspot on when the button in D15 is pressed or esid has never been set.
-  if ((digitalRead(AP_BUTTON) == 0) || esid == "") // debug: find a better way for esid...
+  int ap_button_reading = digitalRead(AP_BUTTON);
+  // only wait for SmartConfig when the AP button is pressed.
+  if ((digitalRead(AP_BUTTON) == 0))
   {
-    Serial.println("* the AP button has been pressed. - Setting new Network config -");
-    Serial.println("- Turning the HotSpot On");
-    launchWeb();
-    setupAP(); // Setup HotSpot
-    Serial.println("- Waiting...");
-    while ((WiFi.status() != WL_CONNECTED))
+    Serial.println("* the AP button has been pressed, setting up new wifi network*");
+    Serial.println("- Waiting for SmartConfig...");
+    WiFi.beginSmartConfig();
+
+    while (!WiFi.smartConfigDone())
     {
       Serial.print(".");
-      digitalWrite(NETWORK_LED, HIGH);
-      delay(250);
-      digitalWrite(NETWORK_LED, LOW);
-      delay(250);
-      server.handleClient();
+      network_led_state = (network_led_state == LOW) ? HIGH : LOW;
+      digitalWrite(NETWORK_LED, network_led_state);
+      delay(500); //wait for smart config to arrive.
     }
-    delay(500);
+    Serial.println("");
+    Serial.println("-> SmartConfig received!");
+    Serial.print("-> Testing new WiFi credentials...");
+
+    // test wifi credentials received.
+    while (WiFi.status() != WL_CONNECTED)
+    {
+      Serial.print(".");
+      network_led_state = (network_led_state == LOW) ? HIGH : LOW;
+      digitalWrite(NETWORK_LED, network_led_state);
+      delay(500);
+    }
+
+    Serial.println("");
+    Serial.print("-> Connected! * IP ADDRESS: ");
+    Serial.println(WiFi.localIP());
+    // save wifi credential in filesystem.
+    save_wifi_data_in_fs();
   }
 
   if ((WiFi.status() == WL_CONNECTED))
   {
     // WiFi connected...
-    digitalWrite(NETWORK_LED, HIGH);
-    digitalWrite(BROKER_LED, client.connected());
+    digitalWrite(NETWORK_LED, HIGH); // solid led indicates internet connection.
 
-    if ((!client.connected()) && (millis() - lastMqttReconnect >= mqttReconnectInterval))
+    if ((!mqtt_client.connected()) && (millis() - lastMqttReconnect >= mqttReconnectInterval))
     {
       // connecting to a mqtt broker
       Serial.println("* MQTT broker connection attempt..");
       lastMqttReconnect = millis();
-      String client_id = "esp32-client-";
+      String client_id = "esp32-mqtt_client-";
       client_id += String(WiFi.macAddress());
-      Serial.printf("- client-id: %s\n", client_id.c_str());
+      Serial.printf("- mqtt_client-id: %s\n", client_id.c_str());
+      digitalWrite(NETWORK_LED, HIGH); //led pulse begin...
       // Try mqtt connection to the broker.
-      if (client.connect(client_id.c_str(), mqtt_username, mqtt_password, willTopic, willQoS, willRetain, willMessage))
+      if (mqtt_client.connect(client_id.c_str(), mqtt_username, mqtt_password, willTopic, willQoS, willRetain, willMessage))
       {
         Serial.printf("- Connected to MQTT broker: %s\n", mqtt_broker);
         // Publish and subscribe
         Serial.println("- Subscribing to mqtt topics:");
-        client.subscribe(topic);
+        mqtt_client.subscribe(topic);
         Serial.println("# Topic 1 ok");
         delay(1000);
-        client.subscribe(topic_2);
+        mqtt_client.subscribe(topic_2);
         Serial.println("# Topic 2 ok");
         delay(1000);
-        client.subscribe(topic_3);
+        mqtt_client.subscribe(topic_3);
         Serial.println("# Topic 3 ok");
         lastSaluteTime = millis();
         Salute = false; // flag to send connection message
@@ -983,38 +1066,49 @@ void wifiloop() //[ok]
       else
       {
         Serial.print("- Failed MQTT connection with state: ");
-        Serial.println(client.state());
+        Serial.println(mqtt_client.state());
+        digitalWrite(NETWORK_LED, LOW); // led pulse end...
         return;
       }
     }
 
     if (!Salute && millis() - lastSaluteTime > SaluteTimer)
     {
-      client.publish("device/hello", "connected");
+      mqtt_client.publish("device/hello", "connected");
       Salute = true;
       Serial.println("** MQTT \"Salute\" message sent");
     }
     return;
   }
-  // WiFi Reconnect
-  digitalWrite(NETWORK_LED, LOW);
-  digitalWrite(BROKER_LED, LOW);
-  if ((WiFi.status() != WL_CONNECTED) && (millis() - lastWifiReconnect >= wifiReconnectInterval))
+  // WiFi Disconnected
+  if (WiFi.status() != WL_CONNECTED)
   {
-    // WiFi disconnected
-    Serial.println("Device disconnected from WiFi network..");
-    Serial.print("WiFi connection status: ");
-    Serial.println(WiFi.status());
-    Serial.println("Trying connection to WiFi network...");
-    WiFi.disconnect();
-    WiFi.begin(esid.c_str(), epass.c_str());
-    lastWifiReconnect = millis();
+    unsigned long currentTime = millis();
+    //led user feedback
+    if (currentTime - lastNetworkLedBlink >= wifiDisconnectedLedInterval)
+    {
+      lastNetworkLedBlink = currentTime;
+      network_led_state = (network_led_state == LOW) ? HIGH : LOW;
+      digitalWrite(NETWORK_LED, network_led_state);
+    }
+
+    if (currentTime - lastWifiReconnect >= wifiReconnectInterval)
+    {
+      lastWifiReconnect = currentTime;
+      Serial.println("Device disconnected from WiFi network..");
+      Serial.print("WiFi connection status: ");
+      Serial.println(WiFi.status());
+      Serial.println("Trying to reconnect to SSID: ");
+      Serial.println(WiFi.SSID());
+      WiFi.disconnect();
+      WiFi.begin(esid.c_str(), epass.c_str());
+    }
     return;
   }
 }
 
 // Codigo del boton de interrupcion
-void PowerAC() //[ok]
+void read_manual_button_state() //[ok]
 {
   // Apaga o enciende el aire depediendo del estado
 
@@ -1025,14 +1119,14 @@ void PowerAC() //[ok]
     {
       Serial.println("- Turning off the system.");
       SysState = "off";
-      spiffs_save_state();
+      save_operation_state_in_fs();
       Envio = true;
     }
     else if (SysState == "off")
     {
       Serial.println("- Turning on the system.");
       SysState = "on";
-      spiffs_save_state();
+      save_operation_state_in_fs();
       Envio = true;
     }
     else if (SysState == "sleep")
@@ -1052,12 +1146,14 @@ void PowerAC() //[ok]
   }
 }
 
-void NotifyStateChange()
+//notifica al broker el cambio de estado del sistema.
+void notify_state_update_to_broker()
 {
   if (PrevSysState == SysState)
   {
     return;
   }
+  PrevSysState = SysState; // assign PrevSysState the current SysState
   String pass = mqtt_password;
   // String message = "{\"variable\":\"sys_state_update\",\"value\":\"";
   // message += SysState;
@@ -1071,17 +1167,16 @@ void NotifyStateChange()
   message += PrevSysState;
   Serial.println("* Sending MQTT notification for SysState update..");
   // sending message.
-  bool message_sent = client.publish("device/stateNotification", message.c_str());
+  bool message_sent = mqtt_client.publish("device/stateNotification", message.c_str());
   Serial.print("- MQTT publish result: ");
   Serial.println(message_sent);
-  PrevSysState = SysState; // assign PrevSysState the current SysState
   return;
 }
 
-// Envio de datos a Tago.io
-void DataMQTTSend() //[ok]
+// Envio de datos recurrente al broker mqtt
+void send_data_to_broker() //[ok]
 {
-  if (!Envio || !client.connected())
+  if (!Envio || !mqtt_client.connected())
   {
     return;
   }
@@ -1133,12 +1228,12 @@ void DataMQTTSend() //[ok]
   Serial.println("* Sending msg to mqtt broker:");
   Serial.println(output);
   // Serial.println(output);
-  bool mqtt_msg_sent = client.publish("tago/data/post", output.c_str());
+  bool mqtt_msg_sent = mqtt_client.publish("tago/data/post", output.c_str());
   Serial.print("- MQTT publish result: ");
   Serial.println(mqtt_msg_sent);
 
   // notify the user about state update...
-  NotifyStateChange();
+  notify_state_update_to_broker();
 
   // // update postingInterval, lower if the system is on
   // if (SysState == "on")
@@ -1154,8 +1249,8 @@ void DataMQTTSend() //[ok]
   lastConnectionTime = millis();
 }
 
-// Hace la lectura y envio de datos de manera periodica
-void SensorsRead(void *pvParameters)
+// Hace la lectura y envio de datos.
+void sensors_read(void *pvParameters)
 {
 
   const TickType_t xDelay = 50 / portTICK_PERIOD_MS;
@@ -1175,15 +1270,15 @@ void SensorsRead(void *pvParameters)
     if (millis() - lastControllerTime > controllerInterval)
     {
       lastControllerTime = millis();
-      Tc = Temperature();
-      t = AmbTemperature();
+      Tc = read_vapor_temp_from_sensor();
+      t = read_amb_temp_from_sensor();
       // Funcion que controla el apagado y encendido automatico (Sleep)
-      AutoOn();
+      system_state_controller();
 
       double tdecimal = (int)(t * 100 + 0.5) / 100.0;
 
       // Funcion que regula latemperatura segun el modo (Cool, auto, fan)
-      TempRegulator(tdecimal);
+      temp_controller(tdecimal);
 
       // Serial feedback
       Serial.println("SysState: " + String(SysState));
@@ -1194,7 +1289,7 @@ void SensorsRead(void *pvParameters)
     }
 
     // Check if the remote button is pressed
-    PowerAC();
+    read_manual_button_state();
 
     // flag to send data to tago.io
     if (millis() - lastConnectionTime > postingInterval)
@@ -1205,9 +1300,11 @@ void SensorsRead(void *pvParameters)
     // remote board led feedback...
     digitalWrite(REMOTE_STATE_LED, SysState == "on");
 
-    // update outputs and send data to broker.
-    EncenderApagar();
-    DataMQTTSend();
+    // update outputs.
+    update_relay_outputs();
+
+    //send data to the mqtt broker
+    send_data_to_broker();
 
     // task delay
     vTaskDelay(xDelay);
@@ -1219,7 +1316,7 @@ void setup()
   Serial.begin(115200);
   // pins definition
   Serial.println("** Hello!, System setup started... **");
-  pinMode(BROKER_LED, OUTPUT);          // broker connection led.
+  // pinMode(BROKER_LED, OUTPUT);          // broker connection led.
   pinMode(NETWORK_LED, OUTPUT);         // network connection led.
   pinMode(REMOTE_BUTTON, INPUT_PULLUP); // remote board button.
   pinMode(REMOTE_COMP_LED, OUTPUT);     // remote comp led.
@@ -1258,11 +1355,12 @@ void setup()
   Serial.println("- OneWire sensors ok.");
 
   // set default values from .txt files
-  Serial.println("* Reading stored values from file system. (SPIFF)");
-  SetTemps();      // user-temp and auto-temp
-  SetEncendido();  // on-off setting
-  SetFuncModo();   // function mode (cool, auto, fan)
-  SettingsSetup(); // timectrl settings
+  Serial.println("* Reading stored values from file system. (SPIFFS)");
+  load_temp_setpoint_from_fs();     // user-temp and auto-temp
+  load_operation_state_from_fs();   // on-off setting
+  load_operation_mode_from_fs();    // function mode (cool, auto, fan)
+  load_timectrl_settings_from_fs(); // timectrl settings
+  load_wifi_data_from_fs();         // load wifi data from filesystem
   Serial.println("- SPIFF system ok.");
   lastCompressorTurnOff = millis(); // set now as the last time the compressor was turned off.. prevents startup after blackout
   // --- continue
@@ -1270,7 +1368,7 @@ void setup()
   // Crea la tarea de lectura de sensores en el segundo procesador.
   Serial.println("* Creating 2nd core task...");
   xTaskCreatePinnedToCore(
-      SensorsRead, /* Function to implement the task */
+      sensors_read, /* Function to implement the task */
       "Task1",     /* Name of the task */
       10000,       /* Stack size in words */
       NULL,        /* Task input parameter */
@@ -1282,177 +1380,157 @@ void setup()
   // WifiSettings
   Serial.println("* Disconnecting from any existing wifi network");
   WiFi.disconnect();
-  EEPROM.begin(512); // Initialasing EEPROM
-  delay(10);
-  //
-  Serial.println("#");
-  Serial.println("#");
-  //---------------------------------------- Read eeprom for ssid and pass
-  Serial.println("* Reading EEPROM ssid");
-  for (int i = 0; i < 32; ++i)
-  {
-    esid += char(EEPROM.read(i));
-  }
-  Serial.println();
-  Serial.print("- SSID: ");
-  Serial.println(esid);
-  Serial.println("* Reading EEPROM pass");
-  for (int i = 32; i < 96; ++i)
-  {
-    epass += char(EEPROM.read(i));
-  }
-  Serial.print("- PASS: ");
-  Serial.println(epass);
-  //--- wifi connection
+  WiFi.mode(WIFI_AP_STA);
+  //---------------------------------------- wifi connection
   Serial.println("* Attempting wifi connection.");
   WiFi.begin(esid.c_str(), epass.c_str());
-  //--- mqtt settings ---
-  client.setBufferSize(mqttBufferSize);
-  client.setServer(mqtt_broker, mqtt_port);
-  client.setCallback(callback);
-  // datetime from ntp server
+  //---------------------------------------- mqtt settings ---
+  mqtt_client.setBufferSize(mqttBufferSize);
+  mqtt_client.setServer(mqtt_broker, mqtt_port);
+  mqtt_client.setCallback(mqtt_message_callback);
+  //---------------------------------------- datetime from ntp server
   Serial.println("* creating NTP server configuration.");
   sntp_set_time_sync_notification_cb(timeavailable);        // sntp sync interval is 1 hour.
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer); // configura tiempo desde el servidor NTP
 
-  // --- end of setup ---
+  //---------------------------------------- end of setup ---
   Serial.println("** Setup completed **");
 }
 
 void loop()
 {
   wifiloop();
-  client.loop();
+  mqtt_client.loop();
   delay(10);
 }
 
 //-----------------------------------------------Funciones para conexion Wifi, guardar credenciales y conectar, no hay que cambiar
-void launchWeb()
-{
-  Serial.println("");
-  if (WiFi.status() == WL_CONNECTED)
-    Serial.println("WiFi connected");
-  Serial.print("Local IP: ");
-  Serial.println(WiFi.localIP());
-  Serial.print("SoftAP IP: ");
-  Serial.println(WiFi.softAPIP());
-  createWebServer();
-  // Start the server
-  server.begin();
-  Serial.println("Server started");
-}
-void setupAP(void)
-{
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect();
-  delay(100);
-  int n = WiFi.scanNetworks();
-  Serial.println("scan done");
-  if (n == 0)
-    Serial.println("no networks found");
-  else
-  {
-    Serial.print(n);
-    Serial.println(" networks found");
-    for (int i = 0; i < n; ++i)
-    {
-      // Print SSID and RSSI for each network found
-      Serial.print(i + 1);
-      Serial.print(": ");
-      Serial.print(WiFi.SSID(i));
-      Serial.print(" (");
-      Serial.print(WiFi.RSSI(i));
-      Serial.print(")");
-      // Serial.println((WiFi.encryptionType(i) == ENC_TYPE_NONE) ? " " : "*");
-      delay(10);
-    }
-  }
-  Serial.println("");
-  st = "<ol>";
-  for (int i = 0; i < n; ++i)
-  {
-    // Print SSID and RSSI for each network found
-    st += "<li>";
-    st += WiFi.SSID(i);
-    st += " (";
-    st += WiFi.RSSI(i);
-    st += ")";
-    // st += (WiFi.encryptionType(i) == ENC_TYPE_NONE) ? " " : "*";
-    st += "</li>";
-  }
-  st += "</ol>";
-  delay(100);
-  WiFi.softAP("HVAC-CONTROLLER", "climatio");
-  Serial.println("Initializing_softap_for_wifi credentials_modification");
-  launchWeb();
-  Serial.println("over");
-}
+// void launchWeb()
+// {
+//   Serial.println("");
+//   if (WiFi.status() == WL_CONNECTED)
+//     Serial.println("WiFi connected");
+//   Serial.print("Local IP: ");
+//   Serial.println(WiFi.localIP());
+//   Serial.print("SoftAP IP: ");
+//   Serial.println(WiFi.softAPIP());
+//   createWebServer();
+//   // Start the server
+//   server.begin();
+//   Serial.println("Server started");
+// }
+// void setupAP(void)
+// {
+//   WiFi.mode(WIFI_STA);
+//   WiFi.disconnect();
+//   delay(100);
+//   int n = WiFi.scanNetworks();
+//   Serial.println("scan done");
+//   if (n == 0)
+//     Serial.println("no networks found");
+//   else
+//   {
+//     Serial.print(n);
+//     Serial.println(" networks found");
+//     for (int i = 0; i < n; ++i)
+//     {
+//       // Print SSID and RSSI for each network found
+//       Serial.print(i + 1);
+//       Serial.print(": ");
+//       Serial.print(WiFi.SSID(i));
+//       Serial.print(" (");
+//       Serial.print(WiFi.RSSI(i));
+//       Serial.print(")");
+//       // Serial.println((WiFi.encryptionType(i) == ENC_TYPE_NONE) ? " " : "*");
+//       delay(10);
+//     }
+//   }
+//   Serial.println("");
+//   st = "<ol>";
+//   for (int i = 0; i < n; ++i)
+//   {
+//     // Print SSID and RSSI for each network found
+//     st += "<li>";
+//     st += WiFi.SSID(i);
+//     st += " (";
+//     st += WiFi.RSSI(i);
+//     st += ")";
+//     // st += (WiFi.encryptionType(i) == ENC_TYPE_NONE) ? " " : "*";
+//     st += "</li>";
+//   }
+//   st += "</ol>";
+//   delay(100);
+//   WiFi.softAP("HVAC-CONTROLLER", "climatio");
+//   Serial.println("Initializing_softap_for_wifi credentials_modification");
+//   launchWeb();
+//   Serial.println("over");
+// }
 
-void createWebServer()
-{
-  {
-    server.on("/", []()
-              {
-      IPAddress ip = WiFi.softAPIP();
-      String ipStr = String(ip[0]) + '.' + String(ip[1]) + '.' + String(ip[2]) + '.' + String(ip[3]);
-      content = "<!DOCTYPE HTML>\r\n<html>Welcome to Wifi Credentials Update page";
-      content += "<form action=\"/scan\" method=\"POST\"><input type=\"submit\" value=\"scan\"></form>";
-      content += ipStr;
-      content += "<p>";
-      content += st;
-      content += "</p><form method='get' action='setting'><label>SSID: </label><input name='ssid' length=32><input name='pass' length=64><input type='submit'></form>";
-      content += "</html>";
-      server.send(200, "text/html", content); });
-    server.on("/scan", []()
-              {
-      //setupAP();
-      IPAddress ip = WiFi.softAPIP();
-      String ipStr = String(ip[0]) + '.' + String(ip[1]) + '.' + String(ip[2]) + '.' + String(ip[3]);
-      content = "<!DOCTYPE HTML>\r\n<html>go back";
-      server.send(200, "text/html", content); });
-    server.on("/setting", []()
-              {
-      IPAddress ip = WiFi.softAPIP();
-      String ipStr = String(ip[0]) + '.' + String(ip[1]) + '.' + String(ip[2]) + '.' + String(ip[3]);
-      String qsid = server.arg("ssid");
-      String qpass = server.arg("pass");
-      if (qsid.length() > 0 && qpass.length() > 0) {
-        Serial.println("clearing eeprom");
-        for (int i = 0; i < 96; ++i) {
-          EEPROM.write(i, 0);
-        }
-        Serial.println(qsid);
-        Serial.println("");
-        Serial.println(qpass);
-        Serial.println("");
-        Serial.println("writing eeprom ssid:");
-        for (int i = 0; i < qsid.length(); ++i)
-        {
-          EEPROM.write(i, qsid[i]);
-          Serial.print("Wrote: ");
-          Serial.println(qsid[i]);
-        }
-        Serial.println("writing eeprom pass:");
-        for (int i = 0; i < qpass.length(); ++i)
-        {
-          EEPROM.write(32 + i, qpass[i]);
-          Serial.print("Wrote: ");
-          Serial.println(qpass[i]);
-        }
-        EEPROM.commit();
-        content = "<!DOCTYPE HTML>\r\n<html><h3>Success.. Saved SSID and PW in eeprom.. reboot to continue.</h3>";
-        content += "<form action=\"/reboot\"><input type=\"submit\" value=\"Reboot board...\"/></form></html>";
-        statusCode = 200;
-      } else {
-        content = "<!DOCTYPE HTML>\r\n<html><h3>Error.. invalid SSID or Password.</h3>";
-        content += "<button onclick=\"history.back()\">Go back</button></html>";
-        statusCode = 400;
-        Serial.println("Sending 400");
-      }
-      server.send(statusCode, "text/html", content); });
-    server.on("/reboot", []()
-              {
-                Serial.println("Reboot in progress...");
-                ESP.restart(); });
-  }
-}
+// void createWebServer()
+// {
+//   {
+//     server.on("/", []()
+//               {
+//       IPAddress ip = WiFi.softAPIP();
+//       String ipStr = String(ip[0]) + '.' + String(ip[1]) + '.' + String(ip[2]) + '.' + String(ip[3]);
+//       content = "<!DOCTYPE HTML>\r\n<html>Welcome to Wifi Credentials Update page";
+//       content += "<form action=\"/scan\" method=\"POST\"><input type=\"submit\" value=\"scan\"></form>";
+//       content += ipStr;
+//       content += "<p>";
+//       content += st;
+//       content += "</p><form method='get' action='setting'><label>SSID: </label><input name='ssid' length=32><input name='pass' length=64><input type='submit'></form>";
+//       content += "</html>";
+//       server.send(200, "text/html", content); });
+//     server.on("/scan", []()
+//               {
+//       //setupAP();
+//       IPAddress ip = WiFi.softAPIP();
+//       String ipStr = String(ip[0]) + '.' + String(ip[1]) + '.' + String(ip[2]) + '.' + String(ip[3]);
+//       content = "<!DOCTYPE HTML>\r\n<html>go back";
+//       server.send(200, "text/html", content); });
+//     server.on("/setting", []()
+//               {
+//       IPAddress ip = WiFi.softAPIP();
+//       String ipStr = String(ip[0]) + '.' + String(ip[1]) + '.' + String(ip[2]) + '.' + String(ip[3]);
+//       String qsid = server.arg("ssid");
+//       String qpass = server.arg("pass");
+//       if (qsid.length() > 0 && qpass.length() > 0) {
+//         Serial.println("clearing eeprom");
+//         for (int i = 0; i < 96; ++i) {
+//           EEPROM.write(i, 0);
+//         }
+//         Serial.println(qsid);
+//         Serial.println("");
+//         Serial.println(qpass);
+//         Serial.println("");
+//         Serial.println("writing eeprom ssid:");
+//         for (int i = 0; i < qsid.length(); ++i)
+//         {
+//           EEPROM.write(i, qsid[i]);
+//           Serial.print("Wrote: ");
+//           Serial.println(qsid[i]);
+//         }
+//         Serial.println("writing eeprom pass:");
+//         for (int i = 0; i < qpass.length(); ++i)
+//         {
+//           EEPROM.write(32 + i, qpass[i]);
+//           Serial.print("Wrote: ");
+//           Serial.println(qpass[i]);
+//         }
+//         EEPROM.commit();
+//         content = "<!DOCTYPE HTML>\r\n<html><h3>Success.. Saved SSID and PW in eeprom.. reboot to continue.</h3>";
+//         content += "<form action=\"/reboot\"><input type=\"submit\" value=\"Reboot board...\"/></form></html>";
+//         statusCode = 200;
+//       } else {
+//         content = "<!DOCTYPE HTML>\r\n<html><h3>Error.. invalid SSID or Password.</h3>";
+//         content += "<button onclick=\"history.back()\">Go back</button></html>";
+//         statusCode = 400;
+//         Serial.println("Sending 400");
+//       }
+//       server.send(statusCode, "text/html", content); });
+//     server.on("/reboot", []()
+//               {
+//                 Serial.println("Reboot in progress...");
+//                 ESP.restart(); });
+//   }
+// }

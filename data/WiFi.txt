@@ -1,0 +1,4 @@
+{
+    "ssid":"controller_network",
+    "pass":"randompassword"
+}
