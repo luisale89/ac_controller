@@ -112,8 +112,8 @@ float CurrentSysTemp;
 bool Salute = false;
 bool MovingSensor = false;
 bool schedule_enabled; // Variables de activacion del modo sleep
-double Tc = 22;
-double t = 22;
+double vapor_temp = 22;
+double ambient_temp = 22;
 
 // NTP
 const char *ntpServer = "pool.ntp.org";
@@ -815,7 +815,7 @@ double read_vapor_temp_from_sensor() //[ok]
   if (temperatureC == 85 || temperatureC == -127)
   {
     Serial.println("$ Error reading OneWire sensor - [Evaporator Temperature]");
-    return Tc; // return las valid value from Tc variable..
+    return vapor_temp; // return las valid value from vapor_temp variable..
   }
   return temperatureC;
 }
@@ -828,7 +828,7 @@ double read_amb_temp_from_sensor() //[ok]
   if (temperatureAmbC == 85 || temperatureAmbC == -127)
   {
     Serial.println("$ Error reading OneWire sensor - [Ambient temperature]");
-    return t; // return las valid value from t variable..
+    return ambient_temp; // return las valid value from ambient_temp variable..
   }
   return temperatureAmbC;
 }
@@ -1173,7 +1173,7 @@ void send_data_to_broker() //[ok]
     return;
   }
 
-  double tdecimal = (int)(t * 100 + 0.5) / 100.0;
+  double tdecimal = (int)(ambient_temp * 100 + 0.5) / 100.0;
 
   // TAGO.IO SEND DATA
   bool Y = false;
@@ -1208,7 +1208,7 @@ void send_data_to_broker() //[ok]
   JsonObject metadata = doc.createNestedObject("metadata");
   metadata["user_setpoint"] = SelectTemp;
   metadata["active_setpoint"] = CurrentSysTemp;
-  metadata["re_temp"] = Tc;
+  metadata["re_temp"] = vapor_temp;
   metadata["G"] = G;
   metadata["Y"] = Y;
   metadata["sys_state"] = SysState;
@@ -1262,12 +1262,12 @@ void sensors_read(void *pvParameters)
     if (millis() - lastControllerTime > controllerInterval)
     {
       lastControllerTime = millis();
-      Tc = read_vapor_temp_from_sensor();
-      t = read_amb_temp_from_sensor();
+      vapor_temp = read_vapor_temp_from_sensor();
+      ambient_temp = read_amb_temp_from_sensor();
       // Funcion que controla el apagado y encendido automatico (Sleep)
       system_state_controller();
 
-      double tdecimal = (int)(t * 100 + 0.5) / 100.0;
+      double tdecimal = (int)(ambient_temp * 100 + 0.5) / 100.0;
 
       // Funcion que regula latemperatura segun el modo (Cool, auto, fan)
       temp_controller(tdecimal);
