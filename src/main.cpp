@@ -1,8 +1,8 @@
 // Libreria conexion wifi y tago
 #include <WiFi.h>
 #include <PubSubClient.h>
-#include <WebServer.h>
-#include <EEPROM.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
 #include <SPI.h>
 #include <ArduinoJson.hpp>
 #include <ArduinoJson.h>
@@ -48,8 +48,8 @@ OneWire oneWire(oneWirePipe);
 OneWire oneWireAmbTemp(oneWireAmb);
 
 // Pass our oneWire reference to Dallas Temperature sensor
-DallasTemperature sensors(&oneWire);
-DallasTemperature sensorAmb(&oneWireAmbTemp);
+DallasTemperature vapor_temp_sensor(&oneWire);
+DallasTemperature ambient_temp_sensor(&oneWireAmbTemp);
 
 // Time Variables
 unsigned long lastConnectionTime = 0; // last time a message was sent to the broker, in milliseconds
@@ -60,7 +60,6 @@ unsigned long lastCompressorTurnOff = 0;
 unsigned long lastWifiReconnect = 0;
 unsigned long lastMqttReconnect = 0;
 unsigned long lastNetworkLedBlink = 0;
-unsigned long lastApButtonDebounce = 0;
 unsigned long postingInterval = 5L * 60000L;   // delay between updates, in milliseconds.. 5 minutes
 unsigned long CompressorTimeOut = 4L * 30000L; // 2 minutos de retardo para habilitar el compresor..
 unsigned long MovingSensorTime = 0;
@@ -71,7 +70,6 @@ const unsigned long SaluteTimer = 1L * 30000L;           // Tiempo para enviar q
 const unsigned long wifiReconnectInterval = 1 * 30000L;  // 30 segundos para intentar reconectar al wifi.
 const unsigned long mqttReconnectInterval = 1L * 10000L; // 10 segundos para intentar reconectar al broker mqtt.
 const unsigned long wifiDisconnectedLedInterval = 250;        // 250 ms
-const unsigned long ApButtonDebounceInterval = 3000;           // 3 seconds pressed
 
 // MQTT Broker
 const char *mqtt_broker = "mqtt.tago.io";
@@ -811,8 +809,8 @@ void system_state_controller() //[OK]
 // Lee temperatura
 double read_vapor_temp_from_sensor() //[ok]
 {
-  sensors.requestTemperatures();
-  float temperatureC = sensors.getTempCByIndex(0);
+  vapor_temp_sensor.requestTemperatures();
+  float temperatureC = vapor_temp_sensor.getTempCByIndex(0);
   Serial.println(temperatureC);
   if (temperatureC == 85 || temperatureC == -127)
   {
@@ -824,8 +822,8 @@ double read_vapor_temp_from_sensor() //[ok]
 
 double read_amb_temp_from_sensor() //[ok]
 {
-  sensorAmb.requestTemperatures();
-  float temperatureAmbC = sensorAmb.getTempCByIndex(0);
+  ambient_temp_sensor.requestTemperatures();
+  float temperatureAmbC = ambient_temp_sensor.getTempCByIndex(0);
   Serial.println(temperatureAmbC);
   if (temperatureAmbC == 85 || temperatureAmbC == -127)
   {
@@ -943,7 +941,7 @@ void load_wifi_data_from_fs()
   String wifi_data = f.readString();
   // String input;
 
-  StaticJsonDocument<128> doc1;
+  StaticJsonDocument<256> doc1;
   DeserializationError error = deserializeJson(doc1, wifi_data);
 
   if (error)
@@ -965,7 +963,7 @@ void load_wifi_data_from_fs()
 // guarda la configuración wifi recibida por smartConfig
 void save_wifi_data_in_fs()
 {
-  StaticJsonDocument<128> doc;
+  StaticJsonDocument<256> doc;
   String output;
 
   doc["ssid"] = WiFi.SSID();
@@ -996,7 +994,6 @@ void save_wifi_data_in_fs()
 // Este loop verifica que el wifi este conectado correctamente
 void wifiloop() //[ok]
 {
-  int ap_button_reading = digitalRead(AP_BUTTON);
   // only wait for SmartConfig when the AP button is pressed.
   if ((digitalRead(AP_BUTTON) == 0))
   {
@@ -1155,11 +1152,6 @@ void notify_state_update_to_broker()
   }
   PrevSysState = SysState; // assign PrevSysState the current SysState
   String pass = mqtt_password;
-  // String message = "{\"variable\":\"sys_state_update\",\"value\":\"";
-  // message += SysState;
-  // message += "\",\"metadata\":{\"pw\":\"";
-  // message += pass;
-  // message += "\"}}";
   String message = SysState;
   message += ",";
   message += pass;
@@ -1347,12 +1339,12 @@ void setup()
   Serial.println("- RTC ok.");
 
   // Inicio Sensores OneWire
-  Serial.println("* OneWire sensors inisialization");
-  sensors.begin();
+  Serial.println("* OneWire vapor_temp_sensor inisialization");
+  vapor_temp_sensor.begin();
   delay(1000);
-  sensorAmb.begin();
+  ambient_temp_sensor.begin();
   delay(1000);
-  Serial.println("- OneWire sensors ok.");
+  Serial.println("- OneWire vapor_temp_sensor ok.");
 
   // set default values from .txt files
   Serial.println("* Reading stored values from file system. (SPIFFS)");
@@ -1378,12 +1370,13 @@ void setup()
   Serial.println("- Task created.");
 
   // WifiSettings
-  Serial.println("* Disconnecting from any existing wifi network");
+  Serial.println("* WiFi settings and config.");
   WiFi.disconnect();
   WiFi.mode(WIFI_AP_STA);
-  //---------------------------------------- wifi connection
-  Serial.println("* Attempting wifi connection.");
   WiFi.begin(esid.c_str(), epass.c_str());
+  //---------------------------------------- esp-now settings
+
+  //comming soon.
   //---------------------------------------- mqtt settings ---
   mqtt_client.setBufferSize(mqttBufferSize);
   mqtt_client.setServer(mqtt_broker, mqtt_port);
@@ -1403,134 +1396,3 @@ void loop()
   mqtt_client.loop();
   delay(10);
 }
-
-//-----------------------------------------------Funciones para conexion Wifi, guardar credenciales y conectar, no hay que cambiar
-// void launchWeb()
-// {
-//   Serial.println("");
-//   if (WiFi.status() == WL_CONNECTED)
-//     Serial.println("WiFi connected");
-//   Serial.print("Local IP: ");
-//   Serial.println(WiFi.localIP());
-//   Serial.print("SoftAP IP: ");
-//   Serial.println(WiFi.softAPIP());
-//   createWebServer();
-//   // Start the server
-//   server.begin();
-//   Serial.println("Server started");
-// }
-// void setupAP(void)
-// {
-//   WiFi.mode(WIFI_STA);
-//   WiFi.disconnect();
-//   delay(100);
-//   int n = WiFi.scanNetworks();
-//   Serial.println("scan done");
-//   if (n == 0)
-//     Serial.println("no networks found");
-//   else
-//   {
-//     Serial.print(n);
-//     Serial.println(" networks found");
-//     for (int i = 0; i < n; ++i)
-//     {
-//       // Print SSID and RSSI for each network found
-//       Serial.print(i + 1);
-//       Serial.print(": ");
-//       Serial.print(WiFi.SSID(i));
-//       Serial.print(" (");
-//       Serial.print(WiFi.RSSI(i));
-//       Serial.print(")");
-//       // Serial.println((WiFi.encryptionType(i) == ENC_TYPE_NONE) ? " " : "*");
-//       delay(10);
-//     }
-//   }
-//   Serial.println("");
-//   st = "<ol>";
-//   for (int i = 0; i < n; ++i)
-//   {
-//     // Print SSID and RSSI for each network found
-//     st += "<li>";
-//     st += WiFi.SSID(i);
-//     st += " (";
-//     st += WiFi.RSSI(i);
-//     st += ")";
-//     // st += (WiFi.encryptionType(i) == ENC_TYPE_NONE) ? " " : "*";
-//     st += "</li>";
-//   }
-//   st += "</ol>";
-//   delay(100);
-//   WiFi.softAP("HVAC-CONTROLLER", "climatio");
-//   Serial.println("Initializing_softap_for_wifi credentials_modification");
-//   launchWeb();
-//   Serial.println("over");
-// }
-
-// void createWebServer()
-// {
-//   {
-//     server.on("/", []()
-//               {
-//       IPAddress ip = WiFi.softAPIP();
-//       String ipStr = String(ip[0]) + '.' + String(ip[1]) + '.' + String(ip[2]) + '.' + String(ip[3]);
-//       content = "<!DOCTYPE HTML>\r\n<html>Welcome to Wifi Credentials Update page";
-//       content += "<form action=\"/scan\" method=\"POST\"><input type=\"submit\" value=\"scan\"></form>";
-//       content += ipStr;
-//       content += "<p>";
-//       content += st;
-//       content += "</p><form method='get' action='setting'><label>SSID: </label><input name='ssid' length=32><input name='pass' length=64><input type='submit'></form>";
-//       content += "</html>";
-//       server.send(200, "text/html", content); });
-//     server.on("/scan", []()
-//               {
-//       //setupAP();
-//       IPAddress ip = WiFi.softAPIP();
-//       String ipStr = String(ip[0]) + '.' + String(ip[1]) + '.' + String(ip[2]) + '.' + String(ip[3]);
-//       content = "<!DOCTYPE HTML>\r\n<html>go back";
-//       server.send(200, "text/html", content); });
-//     server.on("/setting", []()
-//               {
-//       IPAddress ip = WiFi.softAPIP();
-//       String ipStr = String(ip[0]) + '.' + String(ip[1]) + '.' + String(ip[2]) + '.' + String(ip[3]);
-//       String qsid = server.arg("ssid");
-//       String qpass = server.arg("pass");
-//       if (qsid.length() > 0 && qpass.length() > 0) {
-//         Serial.println("clearing eeprom");
-//         for (int i = 0; i < 96; ++i) {
-//           EEPROM.write(i, 0);
-//         }
-//         Serial.println(qsid);
-//         Serial.println("");
-//         Serial.println(qpass);
-//         Serial.println("");
-//         Serial.println("writing eeprom ssid:");
-//         for (int i = 0; i < qsid.length(); ++i)
-//         {
-//           EEPROM.write(i, qsid[i]);
-//           Serial.print("Wrote: ");
-//           Serial.println(qsid[i]);
-//         }
-//         Serial.println("writing eeprom pass:");
-//         for (int i = 0; i < qpass.length(); ++i)
-//         {
-//           EEPROM.write(32 + i, qpass[i]);
-//           Serial.print("Wrote: ");
-//           Serial.println(qpass[i]);
-//         }
-//         EEPROM.commit();
-//         content = "<!DOCTYPE HTML>\r\n<html><h3>Success.. Saved SSID and PW in eeprom.. reboot to continue.</h3>";
-//         content += "<form action=\"/reboot\"><input type=\"submit\" value=\"Reboot board...\"/></form></html>";
-//         statusCode = 200;
-//       } else {
-//         content = "<!DOCTYPE HTML>\r\n<html><h3>Error.. invalid SSID or Password.</h3>";
-//         content += "<button onclick=\"history.back()\">Go back</button></html>";
-//         statusCode = 400;
-//         Serial.println("Sending 400");
-//       }
-//       server.send(statusCode, "text/html", content); });
-//     server.on("/reboot", []()
-//               {
-//                 Serial.println("Reboot in progress...");
-//                 ESP.restart(); });
-//   }
-// }
