@@ -120,6 +120,59 @@ const char *ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = -4 * 3600;
 const int daylightOffset_sec = 0;
 
+// ESP-NOW VARS
+esp_now_peer_info_t slave;
+int WiFi_channel;
+int msg_counter = 0;
+
+enum MessageType {PAIRING, CONTROLLER_DATA, MONITOR_DATA,};
+enum SenderID {SERVER, CONTROLLER, MONITOR,};
+enum SystemModes {SYS_OFF, SYS_FAN, SYS_COOL, SYS_AUTOCL,};
+MessageType espnow_msg_type;
+SystemModes espnow_system_mode;
+SenderID espnow_peer_id;
+
+typedef struct pairing_data_struct {
+  uint8_t msg_type;             // (1 byte)
+  uint8_t sender_id;            // (1 byte)
+  uint8_t macAddr[6];           // (6 bytes)
+  uint8_t channel;              // (1 byte)
+} pairing_data_struct;
+
+typedef struct controller_data_struct {
+  uint8_t msg_type;             // (1 byte)
+  uint8_t sender_id;            // (1 byte)
+  uint8_t system_mode;          // (1 byte)
+  uint8_t system_setp;          // (1 byte) active temperature setpoint..
+  uint8_t fault_code;           // (1 byte) 0-no_fault; 1..255 controller_fault_codes.
+  float room_temp;              // (4 bytes)
+  float evap_vapor_line_temp;   // (4 bytes)
+  float evap_air_in_temp;       // (4 bytes)
+  float evap_air_out_temp;      // (4 bytes)
+} controller_data_struct;
+
+typedef struct monitor_data_struct {
+  uint8_t msg_type;             // (1 byte)
+  uint8_t sender_id;            // (1 byte)
+  uint8_t fault_code;           // (1 byte)   0-no_fault; 1..255 monitor_fault_codes.
+  float vapor_temp;             // (4 bytes)
+  float vapor_press[3];         // (12 bytes) min - avg - max | pressure readings
+  float liquid_temp;            // (4 bytes)
+  float liquid_press[3];        // (12 bytes) min - avg - max | pressure readings
+  float discharge_temp;         // (4 bytes)
+  float ambient_temp;           // (4 bytes)
+  uint8_t compressor_amp[3];    // (3 bytes)  min - avg - max | compressor_current readings ; 100A max...
+  uint8_t compressor_state;     // (1 byte)   255-compressor_on; 0-compressor_off;
+} monitor_data_struct;
+
+
+pairing_data_struct incoming_pairing_data;
+controller_data_struct incoming_controller_data;
+monitor_data_struct incoming_monitor_a_data;
+monitor_data_struct incoming_monitor_b_data; //system B, optional... according to sender_id value.
+monitor_data_struct outgoint_monitor_data;
+controller_data_struct outgoint_controller_data;
+
 // Guarda el estado del sistema en spiffs
 void save_operation_state_in_fs() //[OK]
 {
