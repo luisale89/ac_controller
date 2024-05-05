@@ -1031,7 +1031,7 @@ void wifiloop() //[ok]
   if ((WiFi.status() == WL_CONNECTED))
   {
     // WiFi connected...
-    digitalWrite(NETWORK_LED, HIGH); // solid led indicates internet connection.
+    digitalWrite(NETWORK_LED, HIGH); // solid led indicates active wifi connection.
 
     if ((!mqtt_client.connected()) && (millis() - lastMqttReconnect >= mqttReconnectInterval))
     {
