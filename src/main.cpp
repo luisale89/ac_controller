@@ -125,9 +125,9 @@ esp_now_peer_info_t slave;
 int WiFi_channel;
 int msg_counter = 0;
 
-enum MessageType {PAIRING, CONTROLLER_DATA, MONITOR_DATA,};
+enum MessageType {PAIRING, DATA,};
 enum SenderID {SERVER, CONTROLLER, MONITOR,};
-enum SystemModes {SYS_OFF, SYS_FAN, SYS_COOL, SYS_AUTOCL,};
+enum SystemModes {SYS_OFF, SYS_FAN, SYS_COOL, SYS_AUTO_CL,};
 MessageType espnow_msg_type;
 SystemModes espnow_system_mode;
 SenderID espnow_peer_id;
@@ -137,19 +137,17 @@ typedef struct pairing_data_struct {
   uint8_t sender_id;            // (1 byte)
   uint8_t macAddr[6];           // (6 bytes)
   uint8_t channel;              // (1 byte)
-} pairing_data_struct;
+} pairing_data_struct;          // TOTAL = 9 bytes
 
 typedef struct controller_data_struct {
   uint8_t msg_type;             // (1 byte)
   uint8_t sender_id;            // (1 byte)
-  uint8_t system_mode;          // (1 byte)
-  uint8_t system_setp;          // (1 byte) active temperature setpoint..
+  uint8_t active_system_mode;   // (1 byte)
   uint8_t fault_code;           // (1 byte) 0-no_fault; 1..255 controller_fault_codes.
-  float room_temp;              // (4 bytes)
   float evap_vapor_line_temp;   // (4 bytes)
   float evap_air_in_temp;       // (4 bytes)
   float evap_air_out_temp;      // (4 bytes)
-} controller_data_struct;
+} controller_data_struct;       // TOTAL = 21 bytes
 
 typedef struct monitor_data_struct {
   uint8_t msg_type;             // (1 byte)
@@ -161,17 +159,175 @@ typedef struct monitor_data_struct {
   float liquid_press[3];        // (12 bytes) min - avg - max | pressure readings
   float discharge_temp;         // (4 bytes)
   float ambient_temp;           // (4 bytes)
-  uint8_t compressor_amp[3];    // (3 bytes)  min - avg - max | compressor_current readings ; 100A max...
+  float compressor_amp[3];      // (12 bytes)  min - avg - max | compressor_current readings
   uint8_t compressor_state;     // (1 byte)   255-compressor_on; 0-compressor_off;
-} monitor_data_struct;
+} monitor_data_struct;          // TOTAL = 56 bytes
 
 
-pairing_data_struct incoming_pairing_data;
-controller_data_struct incoming_controller_data;
-monitor_data_struct incoming_monitor_a_data;
-monitor_data_struct incoming_monitor_b_data; //system B, optional... according to sender_id value.
-monitor_data_struct outgoint_monitor_data;
-controller_data_struct outgoint_controller_data;
+typedef struct outgoing_settings_struct {
+  uint8_t msg_type;             // (1 byte)
+  uint8_t sender_id;            // (1 byte)
+  uint8_t fault_restart;        // (1 byte)
+  uint8_t system_setpoint;      // (1 byte)
+  uint8_t system_mode;          // (1 byte)
+  uint8_t room_temp;            // (1 byte)
+} outgoing_settings_struct;     // TOTAL = 6 bytes
+
+
+pairing_data_struct pairing_data;
+controller_data_struct controller_data;
+monitor_data_struct monitor_data;
+outgoing_settings_struct outgoing_settings_data;
+
+void printMAC(const uint8_t * mac_addr) {
+  char mac_str[18];
+  snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
+           mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+  Serial.println(mac_str);
+}
+
+// add peer to peer list.
+bool addPeer(const uint8_t *peer_addr) {      // add pairing
+  memset(&slave, 0, sizeof(slave));
+  const esp_now_peer_info_t *peer = &slave;
+  memcpy(slave.peer_addr, peer_addr, 6);
+  
+  slave.channel = WiFi_channel; // pick a channel
+  slave.encrypt = 0; // no encryption
+  // check if the peer exists
+  bool exists = esp_now_is_peer_exist(slave.peer_addr);
+  if (exists) {
+    // Slave already paired.
+    Serial.println("Already Paired");
+    return true;
+  }
+  else {
+    esp_err_t addStatus = esp_now_add_peer(peer);
+    if (addStatus == ESP_OK) {
+      // Pair success
+      Serial.println("Pair success");
+      return true;
+    }
+    else 
+    {
+      Serial.println("Pair failed");
+      return false;
+    }
+  }
+} 
+
+// callback when data is sent
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  Serial.print("Last Packet Send Status: ");
+  Serial.print(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success to " : "Delivery Fail to ");
+  printMAC(mac_addr);
+  Serial.println();
+}
+
+
+void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingData, int len) { 
+  Serial.print(len);
+  Serial.print(" bytes of data received from : ");
+  printMAC(mac_addr);
+  Serial.println();
+  StaticJsonDocument<512> root;
+  String payload;
+  uint8_t type = incomingData[0];       // first message byte is the type of message 
+  uint8_t sender_id = incomingData[1];  // second message byte is the sender_id.
+  switch (type) {
+  case DATA:                           // the message is data type
+    if (sender_id == CONTROLLER) 
+    {
+      memcpy(&controller_data, incomingData, sizeof(controller_data));
+      // create a JSON document with received data and send it by event to the web page
+      root["system_mode"] = controller_data.active_system_mode;
+      root["fault_code"] = controller_data.fault_code;
+      root["evap_vapor_line_temp"] = controller_data.evap_vapor_line_temp;
+      root["evap_air_in_temp"] = controller_data.evap_air_in_temp;
+      root["evap_air_out_temp"] = controller_data.evap_air_out_temp;
+      serializeJson(root, Serial);
+      Serial.println();
+    }
+
+    if (sender_id == MONITOR)
+    {
+      memcpy(&monitor_data, incomingData, sizeof(monitor_data));
+      root["fault_code"] = monitor_data.fault_code;
+      root["vapor_temp"] = monitor_data.vapor_temp;
+      root["min_vapor_press"] = monitor_data.vapor_press[0];
+      root["avg_vapor_press"] = monitor_data.vapor_press[1];
+      root["max_vapor_press"] = monitor_data.vapor_press[2];
+      serializeJson(root, Serial);
+    }
+
+    break;
+  
+  case PAIRING:                            // the message is a pairing request 
+    memcpy(&pairing_data, incomingData, sizeof(pairing_data));
+    Serial.println(pairing_data.msg_type);
+    Serial.println(pairing_data.sender_id);
+    Serial.print("Pairing request from: ");
+    printMAC(mac_addr);
+    Serial.println();
+    Serial.println(pairing_data.channel);
+    if (pairing_data.sender_id > 0) {     // do not replay to server itself
+      if (pairing_data.msg_type == PAIRING) { 
+        pairing_data.sender_id = 0;       // 0 is server
+        // Server is in AP_STA mode: peers need to send data to server soft AP MAC address 
+        WiFi.softAPmacAddress(pairing_data.macAddr);   
+        pairing_data.channel = WiFi_channel;
+        Serial.println("send response");
+        esp_err_t result = esp_now_send(mac_addr, (uint8_t *) &pairing_data, sizeof(pairing_data));
+        addPeer(mac_addr);
+      }  
+    }  
+    break; 
+  }
+}
+
+void initESP_NOW(){
+    // Init ESP-NOW
+    Serial.println("* Setting up new ESP_NOW config...");
+    if (esp_now_init() != ESP_OK) {
+      Serial.println("-- Error initializing ESP-NOW --");
+      return;
+    }
+    esp_now_register_send_cb(OnDataSent);
+    esp_now_register_recv_cb(OnDataRecv);
+    Serial.println("* ESP_NOW Setup Complete!..");
+}
+
+void WiFiEvent(WiFiEvent_t event) {
+  Serial.printf("[WiFi-event] event: %d\n", event);
+  Serial.println();
+switch (event) {
+    case ARDUINO_EVENT_WIFI_READY:               Serial.println("WiFi interface ready"); break;
+    case ARDUINO_EVENT_WIFI_SCAN_DONE:           Serial.println("Completed scan for access points"); break;
+    case ARDUINO_EVENT_WIFI_STA_START:           Serial.println("WiFi client started"); break;
+    case ARDUINO_EVENT_WIFI_STA_STOP:            Serial.println("WiFi clients stopped"); break;
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:       Serial.println("Connected to access point"); break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:    Serial.println("Disconnected from WiFi access point"); break;
+    case ARDUINO_EVENT_WIFI_STA_AUTHMODE_CHANGE: Serial.println("Authentication mode of access point has changed"); break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      Serial.print("Obtained IP address: ");
+      Serial.println(WiFi.localIP());
+      break;
+    case ARDUINO_EVENT_WIFI_STA_LOST_IP:        Serial.println("Lost IP address and IP address is reset to 0"); break;
+    case ARDUINO_EVENT_WPS_ER_SUCCESS:          Serial.println("WiFi Protected Setup (WPS): succeeded in enrollee mode"); break;
+    case ARDUINO_EVENT_WPS_ER_FAILED:           Serial.println("WiFi Protected Setup (WPS): failed in enrollee mode"); break;
+    case ARDUINO_EVENT_WPS_ER_TIMEOUT:          Serial.println("WiFi Protected Setup (WPS): timeout in enrollee mode"); break;
+    case ARDUINO_EVENT_WPS_ER_PIN:              Serial.println("WiFi Protected Setup (WPS): pin code in enrollee mode"); break;
+    case ARDUINO_EVENT_WIFI_AP_START:           Serial.println("WiFi access point started"); break;
+    case ARDUINO_EVENT_WIFI_AP_STOP:            Serial.println("WiFi access point  stopped"); break;
+    case ARDUINO_EVENT_WIFI_AP_STACONNECTED:    Serial.println("Client connected"); break;
+    case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED: Serial.println("Client disconnected"); break;
+    case ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED:   Serial.println("Assigned IP address to client"); break;
+    case ARDUINO_EVENT_WIFI_AP_PROBEREQRECVED:  Serial.println("Received probe request"); break;
+    case ARDUINO_EVENT_WIFI_AP_GOT_IP6:         Serial.println("AP IPv6 is preferred"); break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP6:        Serial.println("STA IPv6 is preferred"); break;
+    default:                                    break;
+  }
+}
 
 // Guarda el estado del sistema en spiffs
 void save_operation_state_in_fs() //[OK]
@@ -1052,6 +1208,7 @@ void wifiloop() //[ok]
   {
     Serial.println("* the AP button has been pressed, setting up new wifi network*");
     Serial.println("- Waiting for SmartConfig...");
+    WiFi.disconnect();
     WiFi.beginSmartConfig();
 
     while (!WiFi.smartConfigDone())
@@ -1392,12 +1549,12 @@ void setup()
   Serial.println("- RTC ok.");
 
   // Inicio Sensores OneWire
-  Serial.println("* OneWire vapor_temp_sensor inisialization");
+  Serial.println("* OneWire sensors inisialization");
   vapor_temp_sensor.begin();
   delay(1000);
   ambient_temp_sensor.begin();
   delay(1000);
-  Serial.println("- OneWire vapor_temp_sensor ok.");
+  Serial.println("- OneWire sensors ok.");
 
   // set default values from .txt files
   Serial.println("* Reading stored values from file system. (SPIFFS)");
@@ -1424,13 +1581,14 @@ void setup()
 
   // WifiSettings
   Serial.println("* WiFi settings and config.");
-  WiFi.disconnect();
+  WiFi.disconnect();  //
+  delay(1000);            // 1 second delay
+  WiFi.onEvent(WiFiEvent);
   WiFi.mode(WIFI_AP_STA);
   WiFi.begin(esid.c_str(), epass.c_str());
-  //---------------------------------------- esp-now settings
-
-  //comming soon.
+  Serial.println("- WiFi settings ok.");
   //---------------------------------------- mqtt settings ---
+  Serial.println("* Setting up MQTT");
   mqtt_client.setBufferSize(mqttBufferSize);
   mqtt_client.setServer(mqtt_broker, mqtt_port);
   mqtt_client.setCallback(mqtt_message_callback);
