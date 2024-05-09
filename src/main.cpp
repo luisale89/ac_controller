@@ -1,3 +1,6 @@
+// logging
+#include <esp_log.h>
+static const char* TAG = "HVAC_CTRL";
 // Libreria conexion wifi y tago
 #include <WiFi.h>
 #include <PubSubClient.h>
@@ -173,7 +176,20 @@ controller_data_struct controller_data;
 monitor_data_struct monitor_data;
 outgoing_settings_struct outgoing_settings_data;
 
+//logger functions
+void debug_logger(const char *message) {
+  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "%s", message);
+}
 
+void info_logger(const char *message) {
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "%s", message);
+}
+
+void error_logger(const char *message) {
+  ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "%s", message);
+}
+
+//esp-now functions.
 void printMAC(const uint8_t * mac_addr) {
   char mac_str[18];
   snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -282,19 +298,7 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingData, int len) 
   }
 }
 
-void initESP_NOW(){
-    // Init ESP-NOW
-    Serial.println("* Setting up new ESP_NOW config...");
-    if (esp_now_init() != ESP_OK) {
-      Serial.println("-- Error initializing ESP-NOW --");
-      return;
-    }
-    esp_now_register_send_cb(OnDataSent);
-    esp_now_register_recv_cb(OnDataRecv);
-    Serial.println("* ESP_NOW Setup Complete!..");
-}
-
-void WiFiEvent(WiFiEvent_t event) {
+void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   Serial.printf("[WiFi-event] event: %d", event);
   Serial.println();
 switch (event) {
@@ -311,15 +315,14 @@ switch (event) {
       Serial.println(WiFi.softAPmacAddress());
       Serial.print("+ Server STA MAC Address: ");
       Serial.println(WiFi.macAddress());
-      //init ESP_NOW->
-      Serial.println("++ Setting up ESP_NOW server..");
-      if ((esp_now_unregister_recv_cb() != ESP_OK) || (esp_now_unregister_send_cb() != ESP_OK))
-      {
-        Serial.println("ESP_NOW not initialized yet.. continue.");
-      }
-      initESP_NOW();
       break;
-    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:    Serial.println("+ Disconnected from WiFi access point"); break;
+
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:    
+      Serial.println("+ Disconnected from WiFi access point"); 
+      Serial.println("+ Trying to reconnect...");
+      WiFi.reconnect();
+      break;
+
     case ARDUINO_EVENT_WIFI_STA_AUTHMODE_CHANGE: Serial.println("+ Authentication mode of access point has changed"); break;
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
       Serial.print("+ Obtained IP address: ");
@@ -916,7 +919,7 @@ void system_state_controller() //[OK]
 
   if (!schedule_enabled)
   {
-    Serial.println("Schedule disabled..");
+    debug_logger("Schedule disabled..");
     Sleep = "off";
     return;
   }
@@ -926,7 +929,7 @@ void system_state_controller() //[OK]
 
   if (!SPIFFS.begin(true))
   {
-    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
+    error_logger("Ocurrió un error al ejecutar SPIFFS.");
     return;
   }
 
@@ -935,7 +938,7 @@ void system_state_controller() //[OK]
   // Mensaje de fallo al leer el contenido
   if (!file)
   {
-    Serial.println("Error al abrir el archivo.");
+    error_logger("Error al abrir el archivo.");
     return;
   }
   String AutoOff = file.readString();
@@ -947,8 +950,8 @@ void system_state_controller() //[OK]
 
   if (error)
   {
-    Serial.print("deserializeJson() failed: ");
-    Serial.println(error.c_str());
+    error_logger("deserializeJson() failed: ");
+    error_logger(error.c_str());
     return;
   }
 
@@ -967,20 +970,18 @@ void system_state_controller() //[OK]
   String minuto = "0";
   if (Min < 10)
   {
-    Serial.println("minuto menor a 10");
+    debug_logger("actual minute is lower than dec.10.");
     minuto.concat(Min);
   }
   else
   {
-    Serial.println("minuto 10 o mayor");
+    debug_logger("actual minute is equal to dec.10 or grater.");
     minuto = String(Min);
   }
   String tiempo = hora + minuto;
-  Serial.println("tiempo: " + tiempo);
-  Serial.print("WakeUp at: ");
-  Serial.println(ON);
-  Serial.print("Sleep at: ");
-  Serial.println(OFF);
+  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "Current Time: %s", tiempo);
+  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "Wake Up at: %i", ON);
+  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "Sleep at: %i", OFF);
 
   if (OFF > tiempo.toInt() && ON < tiempo.toInt())
   {
@@ -997,7 +998,7 @@ void system_state_controller() //[OK]
       }
       if (Sleep == "off")
       {
-        Serial.println("New [variable] Sleep: " + String(Sleep));
+        ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "New Sleep.var value: %s", Sleep);
         SysState = "on";
         save_operation_state_in_fs();
       }
@@ -1019,7 +1020,7 @@ void system_state_controller() //[OK]
       }
       if (Sleep == "on")
       {
-        Serial.println("New [variable] Sleep: " + String(Sleep));
+        ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "New Sleep.var value: %s", Sleep);
         SysState = "sleep";
         save_operation_state_in_fs();
       }
@@ -1033,10 +1034,10 @@ double read_vapor_temp_from_sensor() //[ok]
 {
   vapor_temp_sensor.requestTemperatures();
   float temperatureC = vapor_temp_sensor.getTempCByIndex(0);
-  Serial.println(temperatureC);
+  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "Vapor temperature: %3.2f °C", temperatureC);
   if (temperatureC == 85 || temperatureC == -127)
   {
-    Serial.println("$ Error reading OneWire sensor - [Evaporator Temperature]");
+    error_logger("Error reading OneWire sensor - [Vapor temperature]");
     return vapor_temp; // return las valid value from vapor_temp variable..
   }
   return temperatureC;
@@ -1046,10 +1047,10 @@ double read_amb_temp_from_sensor() //[ok]
 {
   ambient_temp_sensor.requestTemperatures();
   float temperatureAmbC = ambient_temp_sensor.getTempCByIndex(0);
-  Serial.println(temperatureAmbC);
+  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "Ambient temperature: %3.2f °C", temperatureAmbC);
   if (temperatureAmbC == 85 || temperatureAmbC == -127)
   {
-    Serial.println("$ Error reading OneWire sensor - [Ambient temperature]");
+    error_logger("Error reading OneWire sensor - [Ambient temperature]");
     return ambient_temp; // return las valid value from ambient_temp variable..
   }
   return temperatureAmbC;
@@ -1104,7 +1105,7 @@ void update_relay_outputs() //[ok]
   // Si el cambio es para apagar el sistema,
   if (!Y && !G)
   {
-    Serial.println("* SysUpdate: Turning off the fan and compressor..");
+    info_logger("Relays update: Turning off the fan and compressor..");
     digitalWrite(Pin_compresor, Y);
     digitalWrite(REMOTE_COMP_LED, Y);
     delay(250); // delay between relays
@@ -1119,7 +1120,7 @@ void update_relay_outputs() //[ok]
     digitalWrite(Pin_vent, G); // Enciende el ventilador..
     if (millis() - lastCompressorTurnOff > CompressorTimeOut)
     {
-      Serial.println("* SysUpdate: Turning on the compressor and the fan.. Cooling mode..");
+      info_logger("Relays Update: Turning on the compressor and the fan.. Cooling mode..");
       delay(250);                     // delay between relays
       digitalWrite(Pin_compresor, Y); // aquí se produce el cambio  del YState, y para el próximo loop no entra en esta parte del código..
       digitalWrite(REMOTE_COMP_LED, Y);
@@ -1132,7 +1133,7 @@ void update_relay_outputs() //[ok]
   // Si el cambio es para que el sistema no enfríe, pero funcione la turbina del evaporador..
   else if (!Y && G)
   {
-    Serial.println("* SysUpdate: Fan only, compressor turned off..");
+    info_logger("Relays Update: Fan only, compressor turned off..");
     digitalWrite(Pin_vent, G);
     digitalWrite(Pin_compresor, Y);
     digitalWrite(REMOTE_COMP_LED, Y);
@@ -1245,15 +1246,14 @@ void wifiloop() //[ok]
     }
 
     Serial.println("");
-    Serial.print("-> Connected! * IP ADDRESS: ");
-    Serial.println(WiFi.localIP());
+    Serial.print("-> Connected to new WiFi network! smart config finished..");
     // save wifi credential in filesystem.
     save_wifi_data_in_fs();
   }
-
+  
+  // WiFi connected
   if ((WiFi.status() == WL_CONNECTED))
   {
-    // WiFi connected...
     digitalWrite(NETWORK_LED, HIGH); // solid led indicates active wifi connection.
 
     if ((!mqtt_client.connected()) && (millis() - lastMqttReconnect >= mqttReconnectInterval))
@@ -1300,6 +1300,7 @@ void wifiloop() //[ok]
     }
     return;
   }
+
   // WiFi Disconnected
   if (WiFi.status() != WL_CONNECTED)
   {
@@ -1312,17 +1313,16 @@ void wifiloop() //[ok]
       digitalWrite(NETWORK_LED, network_led_state);
     }
 
-    if (currentTime - lastWifiReconnect >= wifiReconnectInterval)
-    {
-      lastWifiReconnect = currentTime;
-      Serial.println("Device disconnected from WiFi network..");
-      Serial.print("WiFi connection status: ");
-      Serial.println(WiFi.status());
-      Serial.println("Trying to reconnect to SSID: ");
-      Serial.println(WiFi.SSID());
-      WiFi.disconnect();
-      WiFi.begin(esid.c_str(), epass.c_str());
-    }
+    // if (currentTime - lastWifiReconnect >= wifiReconnectInterval)
+    // {
+    //   lastWifiReconnect = currentTime;
+    //   Serial.println("Device disconnected from WiFi network..");
+    //   Serial.print("WiFi connection status: ");
+    //   Serial.println(WiFi.status());
+    //   Serial.println("Trying to reconnect to SSID: ");
+    //   Serial.println(WiFi.SSID());
+    //   WiFi.disconnect();
+    // }
     return;
   }
 }
@@ -1334,17 +1334,17 @@ void read_manual_button_state() //[ok]
 
   if (digitalRead(REMOTE_BUTTON) == 0 && millis() - lastButtonPress > buttonTimeOut)
   {
-    Serial.println("* Remote Button has been pressed..");
+    info_logger("* Remote Button has been pressed..");
     if (SysState == "on")
     {
-      Serial.println("- Turning off the system.");
+      info_logger("- Turning off the system.");
       SysState = "off";
       save_operation_state_in_fs();
       Envio = true;
     }
     else if (SysState == "off")
     {
-      Serial.println("- Turning on the system.");
+      info_logger("Turning on the system.");
       SysState = "on";
       save_operation_state_in_fs();
       Envio = true;
@@ -1353,7 +1353,7 @@ void read_manual_button_state() //[ok]
     {
       // on Sleep State, the user can't change the System State with the local button..
       // block State change and notify to the user with blinking led.
-      Serial.println("- System is in Sleep mode, remote button has no effect.");
+      info_logger("System is in Sleep mode, remote button has no effect.");
       for (int i = 0; i <= 2; i++) // three times
       {
         digitalWrite(REMOTE_STATE_LED, HIGH);
@@ -1380,11 +1380,10 @@ void notify_state_update_to_broker()
   message += pass;
   message += ",";
   message += PrevSysState;
-  Serial.println("* Sending MQTT notification for SysState update..");
+  info_logger("Notifying MQTT broker on System State update..");
   // sending message.
   bool message_sent = mqtt_client.publish("device/stateNotification", message.c_str());
-  Serial.print("- MQTT publish result: ");
-  Serial.println(message_sent);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "MQTT publish result: %s", message_sent ? "message sent!" : "fail");
   return;
 }
 
@@ -1413,14 +1412,7 @@ void send_data_to_broker() //[ok]
   }
 
   String timectrl;
-  if (schedule_enabled)
-  {
-    timectrl = "on";
-  }
-  else
-  {
-    timectrl = "off";
-  }
+  timectrl = schedule_enabled ? "on": "off";
   // json todas las variables, falta recoleccion
   String output;
   StaticJsonDocument<256> doc;
@@ -1440,12 +1432,11 @@ void send_data_to_broker() //[ok]
   metadata["timectrl"] = timectrl;
 
   serializeJson(doc, output);
-  Serial.println("* Sending msg to mqtt broker:");
-  Serial.println(output);
+  info_logger("Publishing system variables to mqtt broker.");
+  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "Message: %s", output.c_str());
   // Serial.println(output);
   bool mqtt_msg_sent = mqtt_client.publish("tago/data/post", output.c_str());
-  Serial.print("- MQTT publish result: ");
-  Serial.println(mqtt_msg_sent);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "MQTT publish result: %s", mqtt_msg_sent ? "message sent!" : "fail");
 
   // notify the user about state update...
   notify_state_update_to_broker();
@@ -1470,37 +1461,28 @@ void sensors_read(void *pvParameters)
 
   const TickType_t xDelay = 50 / portTICK_PERIOD_MS;
   for (;;)
-  {
-
+  { 
     // Lectura de sensor de movimiento va aqui
-    if (digitalRead(PIN_SENMOV))
-    {
-      MovingSensor = true;
-    }
-    else
-    {
-      MovingSensor = false;
-    }
+    MovingSensor = digitalRead(PIN_SENMOV) ? true : false;
 
     if (millis() - lastControllerTime > controllerInterval)
     {
+      info_logger("* Updating sensor readings and exec.controllers");
       lastControllerTime = millis();
       vapor_temp = read_vapor_temp_from_sensor();
       ambient_temp = read_amb_temp_from_sensor();
+      double tdecimal = (int)(ambient_temp * 100 + 0.5) / 100.0;
+
       // Funcion que controla el apagado y encendido automatico (Sleep)
       system_state_controller();
-
-      double tdecimal = (int)(ambient_temp * 100 + 0.5) / 100.0;
 
       // Funcion que regula latemperatura segun el modo (Cool, auto, fan)
       temp_controller(tdecimal);
 
-      // Serial feedback
-      Serial.println("SysState: " + String(SysState));
-      Serial.println("SysFunc: " + String(SysFunc));
-      Serial.print("Movement: ");
-      Serial.println(MovingSensor);
-      Serial.println("---**---");
+      // logging
+      ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "System state: %s", SysState);
+      ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "System function: %s", SysFunc);
+      ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "Presence sensor: %s", MovingSensor ? "detecting": "empty room");
     }
 
     // Check if the remote button is pressed
@@ -1529,8 +1511,9 @@ void sensors_read(void *pvParameters)
 void setup()
 {
   Serial.begin(115200);
+  esp_log_level_set("*", ESP_LOG_DEBUG); //set all logger on debug.
+  info_logger("** Hello!, System setup started... **");
   // pins definition
-  Serial.println("** Hello!, System setup started... **");
   // pinMode(BROKER_LED, OUTPUT);          // broker connection led.
   pinMode(NETWORK_LED, OUTPUT);         // network connection led.
   pinMode(REMOTE_BUTTON, INPUT_PULLUP); // remote board button.
@@ -1546,42 +1529,71 @@ void setup()
     ; // wait for serial port to connect. Needed for native USB
 #endif
 
-  Serial.println("* RTC start on I2C bus..");
+  info_logger("Setting up RTC on I2C bus.");
   if (!DS1307_RTC.begin())
   {
-    Serial.println("$ Couldn't find RTC, please reboot.");
+    error_logger("Couldn't find RTC, please reboot.");
     while (1)
       ;
   }
   if (!DS1307_RTC.isrunning())
   {
-    Serial.println("- RTC is NOT running!, setting up sketch compiled datetime.");
+    info_logger("RTC is NOT running yet!, setting up on sketch compiled datetime.");
     // following line sets the RTC to the date & time this sketch was compiled
     DS1307_RTC.adjust(DateTime(F(__DATE__), F(__TIME__)));
   }
-  Serial.println("- RTC ok.");
+  info_logger("RTC ok.");
 
   // Inicio Sensores OneWire
-  Serial.println("* OneWire sensors inisialization");
+  info_logger("OneWire sensors inisialization!");
   vapor_temp_sensor.begin();
   delay(1000);
   ambient_temp_sensor.begin();
   delay(1000);
-  Serial.println("- OneWire sensors ok.");
+  info_logger("OneWire sensors ok.");
 
   // set default values from .txt files
-  Serial.println("* Reading stored values from file system. (SPIFFS)");
+  info_logger("Reading stored values from file system. (SPIFFS)");
   load_temp_setpoint_from_fs();     // user-temp and auto-temp
   load_operation_state_from_fs();   // on-off setting
   load_operation_mode_from_fs();    // function mode (cool, auto, fan)
   load_timectrl_settings_from_fs(); // timectrl settings
   load_wifi_data_from_fs();         // load wifi data from filesystem
-  Serial.println("- SPIFF system ok.");
+  info_logger("SPIFF system ok.");
   lastCompressorTurnOff = millis(); // set now as the last time the compressor was turned off.. prevents startup after blackout
   // --- continue
 
+  // WifiSettings
+  info_logger("WiFi settings and config.");
+  WiFi.onEvent(WiFiEvent);
+  WiFi.disconnect();  //
+  delay(1000);            // 1 second delay
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.begin(esid.c_str(), epass.c_str());
+  info_logger("WiFi settings ok.");
+  //---------------------------------------- esp_now settings
+  info_logger("Setting up ESP_NOW");
+  if (esp_now_init() != ESP_OK) {
+    error_logger("-- Error initializing ESP-NOW, please reboot --");
+    while (1){;}
+  }
+  // register esp_callbacks.
+  esp_now_register_send_cb(OnDataSent);
+  esp_now_register_recv_cb(OnDataRecv);
+  info_logger("ESP_NOW Setup Complete!");
+  //---------------------------------------- mqtt settings ---
+  info_logger("Setting up MQTT");
+  mqtt_client.setBufferSize(mqttBufferSize);
+  mqtt_client.setServer(mqtt_broker, mqtt_port);
+  mqtt_client.setCallback(mqtt_message_callback);
+  info_logger("Mqtt settings done.");
+  //---------------------------------------- datetime from ntp server
+  info_logger("Creating NTP server configuration.");
+  sntp_set_time_sync_notification_cb(timeavailable);        // sntp sync interval is 1 hour.
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer); // configura tiempo desde el servidor NTP
+
   // Crea la tarea de lectura de sensores en el segundo procesador.
-  Serial.println("* Creating 2nd core task...");
+  info_logger("Creating 2nd core task...");
   xTaskCreatePinnedToCore(
       sensors_read, /* Function to implement the task */
       "Task1",     /* Name of the task */
@@ -1590,28 +1602,9 @@ void setup()
       0,           /* Priority of the task */
       &Task1,      /* Task handle. */
       0);
-  Serial.println("- Task created.");
-
-  // WifiSettings
-  Serial.println("* WiFi settings and config.");
-  WiFi.disconnect();  //
-  delay(1000);            // 1 second delay
-  WiFi.onEvent(WiFiEvent);
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.begin(esid.c_str(), epass.c_str());
-  Serial.println("- WiFi settings ok.");
-  //---------------------------------------- mqtt settings ---
-  Serial.println("* Setting up MQTT");
-  mqtt_client.setBufferSize(mqttBufferSize);
-  mqtt_client.setServer(mqtt_broker, mqtt_port);
-  mqtt_client.setCallback(mqtt_message_callback);
-  //---------------------------------------- datetime from ntp server
-  Serial.println("* creating NTP server configuration.");
-  sntp_set_time_sync_notification_cb(timeavailable);        // sntp sync interval is 1 hour.
-  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer); // configura tiempo desde el servidor NTP
 
   //---------------------------------------- end of setup ---
-  Serial.println("** Setup completed **");
+  info_logger("** Setup completed **");
 }
 
 void loop()
