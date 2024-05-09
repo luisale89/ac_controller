@@ -190,38 +190,41 @@ void error_logger(const char *message) {
 }
 
 //esp-now functions.
-void printMAC(const uint8_t * mac_addr) {
+String printMAC(const uint8_t * mac_addr) {
   char mac_str[18];
   snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
            mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
-  Serial.println(mac_str);
+  // return mac_str;
+  String str = (char*) mac_str;
+  return str;
 }
 
 // add peer to peer list.
 bool addPeer(const uint8_t *peer_addr) {      // add pairing
+  info_logger("[esp-now] adding new peer to peer list");
   memset(&slave, 0, sizeof(slave));
   const esp_now_peer_info_t *peer = &slave;
   memcpy(slave.peer_addr, peer_addr, 6);
   
-  slave.channel = 0; // pick a channel.. 0 means it take the current STA channel (connected to AP)
+  slave.channel = WiFi_channel; // pick a channel.. 0 means it take the current STA channel (connected to AP)
   slave.encrypt = 0; // no encryption
   // check if the peer exists
   bool exists = esp_now_is_peer_exist(slave.peer_addr);
   if (exists) {
     // Slave already paired.
-    Serial.println("Already Paired");
+    info_logger("[esp-now] peer already exists.");
     return true;
   }
   else {
     esp_err_t addStatus = esp_now_add_peer(peer);
     if (addStatus == ESP_OK) {
       // Pair success
-      Serial.println("Pair success");
+      info_logger("[esp-now] new peer added successfully.");
       return true;
     }
-    else 
+    else
     {
-      Serial.println("Pair failed");
+      ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[esp-now] Error: %d, while adding new peer.", addStatus);
       return false;
     }
   }
@@ -229,26 +232,29 @@ bool addPeer(const uint8_t *peer_addr) {      // add pairing
 
 // callback when data is sent
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
-  Serial.print("Last Packet Send Status: ");
-  Serial.print(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success to " : "Delivery Fail to ");
-  printMAC(mac_addr);
-  Serial.println();
+  String printable_mac_address = printMAC(mac_addr);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] packet sent to: %s", printable_mac_address.c_str());
+  if (status == ESP_NOW_SEND_SUCCESS) {
+    error_logger("[esp-now] delivery success.");
+  } else {
+    info_logger("[esp-now] delivery fail.");
+  }
 }
 
 
 void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingData, int len) { 
-  Serial.print(len);
-  Serial.print(" bytes of data received from : ");
-  printMAC(mac_addr);
-  Serial.println();
+  String printable_mac_address = printMAC(mac_addr);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] %d bytes of data received from: %s", len, printable_mac_address.c_str());
   StaticJsonDocument<512> root;
   String payload;
   uint8_t type = incomingData[0];       // first message byte is the type of message 
   uint8_t sender_id = incomingData[1];  // second message byte is the sender_id.
   switch (type) {
   case DATA:                           // the message is data type
+    info_logger("[esp-now] message of type DATA arrived.");
     if (sender_id == CONTROLLER) 
     {
+      info_logger("[esp-now] message received from CONTROLLER device.");
       memcpy(&controller_data, incomingData, sizeof(controller_data));
       // create a JSON document with received data and send it by event to the web page
       root["system_mode"] = controller_data.active_system_mode;
@@ -256,91 +262,81 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingData, int len) 
       root["evap_vapor_line_temp"] = controller_data.evap_vapor_line_temp;
       root["evap_air_in_temp"] = controller_data.evap_air_in_temp;
       root["evap_air_out_temp"] = controller_data.evap_air_out_temp;
-      serializeJson(root, Serial);
-      Serial.println();
+      serializeJson(root, payload);
+      info_logger(payload.c_str());
     }
 
     if (sender_id == MONITOR)
     {
+      info_logger("[esp-now] message received from MONITOR device.");
       memcpy(&monitor_data, incomingData, sizeof(monitor_data));
       root["fault_code"] = monitor_data.fault_code;
       root["vapor_temp"] = monitor_data.vapor_temp;
       root["min_vapor_press"] = monitor_data.vapor_press[0];
       root["avg_vapor_press"] = monitor_data.vapor_press[1];
       root["max_vapor_press"] = monitor_data.vapor_press[2];
-      serializeJson(root, Serial);
+      serializeJson(root, payload);
+      info_logger(payload.c_str());
     }
 
     break;
   
   case PAIRING:                            // the message is a pairing request 
+    info_logger("[esp-now] message of type PAIRING arrived.");
     memcpy(&pairing_data, incomingData, sizeof(pairing_data));
-    Serial.println(pairing_data.msg_type);
-    Serial.println(pairing_data.sender_id);
-    Serial.print("[ESP_NOW] - Pairing request from: ");
-    printMAC(mac_addr);
-    Serial.print("Sender WiFi channel: ");
-    Serial.println(pairing_data.channel);
     if (pairing_data.sender_id > 0) {     // do not replay to server itself
-      if (pairing_data.msg_type == PAIRING) { 
-        pairing_data.sender_id = 0;       // 0 is server
-        // Server is in AP_STA mode: peers need to send data to server soft AP MAC address 
-        WiFi.softAPmacAddress(pairing_data.macAddr);   
-        pairing_data.channel = WiFi_channel; // current WiFi_channel value.
-        if (addPeer(mac_addr) == true){
-          Serial.println("[ESP_NOW] - send response to peer with PAIRING data.");
-          esp_err_t result = esp_now_send(mac_addr, (uint8_t *) &pairing_data, sizeof(pairing_data));
-        };
-      }  
+      pairing_data.sender_id = 0;       // 0 is server
+      // Server is in AP_STA mode: peers need to send data to server soft AP MAC address 
+      WiFi.softAPmacAddress(pairing_data.macAddr);   
+      pairing_data.channel = WiFi_channel; // current WiFi_channel value.
+      if (addPeer(mac_addr) == true){
+        info_logger("[esp-now] - sending response to peer with PAIRING data.");
+        esp_now_send(mac_addr, (uint8_t *) &pairing_data, sizeof(pairing_data));
+      }; 
     }
   break;
-  default: Serial.println("[ESP_NOW] - Invalid DATA TYPE received...");
+  default: error_logger("[esp-now] - Invalid DATA type received...");
   }
 }
 
 void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
-  Serial.printf("[WiFi-event] event: %d", event);
-  Serial.println();
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[WiFi event] code: %d", event);
 switch (event) {
-    case ARDUINO_EVENT_WIFI_READY:               Serial.println("+ WiFi interface ready"); break;
-    case ARDUINO_EVENT_WIFI_SCAN_DONE:           Serial.println("+ Completed scan for access points"); break;
-    case ARDUINO_EVENT_WIFI_STA_START:           Serial.println("+ WiFi client started"); break;
-    case ARDUINO_EVENT_WIFI_STA_STOP:            Serial.println("+ WiFi clients stopped"); break;
+    case ARDUINO_EVENT_WIFI_READY:               info_logger("WiFi interface ready"); break;
+    case ARDUINO_EVENT_WIFI_SCAN_DONE:           info_logger("Completed scan for access points"); break;
+    case ARDUINO_EVENT_WIFI_STA_START:           info_logger("WiFi client started"); break;
+    case ARDUINO_EVENT_WIFI_STA_STOP:            info_logger("WiFi clients stopped"); break;
     case ARDUINO_EVENT_WIFI_STA_CONNECTED:       
-      Serial.println("+ Connected to access point");
-      Serial.print("+ WiFi channel: ");
       WiFi_channel = WiFi.channel();
-      Serial.println(WiFi_channel);
-      Serial.print("+ Server SOFT AP MAC Address:  ");
-      Serial.println(WiFi.softAPmacAddress());
-      Serial.print("+ Server STA MAC Address: ");
-      Serial.println(WiFi.macAddress());
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Connected to the AP on the channel: %d", WiFi_channel);
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "SOFT AP MAC Address: %s", WiFi.softAPmacAddress().c_str());
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "STA MAC Address: %s", WiFi.macAddress().c_str());
       break;
 
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:    
-      Serial.println("+ Disconnected from WiFi access point"); 
-      Serial.println("+ Trying to reconnect...");
+      info_logger("Disconnected from WiFi access point"); 
+      info_logger("Trying to reconnect...");
       WiFi.reconnect();
       break;
 
-    case ARDUINO_EVENT_WIFI_STA_AUTHMODE_CHANGE: Serial.println("+ Authentication mode of access point has changed"); break;
+    case ARDUINO_EVENT_WIFI_STA_AUTHMODE_CHANGE: info_logger("+ Authentication mode of access point has changed"); break;
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-      Serial.print("+ Obtained IP address: ");
-      Serial.println(WiFi.localIP());
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "IP Address assigned: %s", WiFi.localIP().toString());
+
       break;
-    case ARDUINO_EVENT_WIFI_STA_LOST_IP:        Serial.println("+ Lost IP address and IP address is reset to 0"); break;
-    case ARDUINO_EVENT_WPS_ER_SUCCESS:          Serial.println("+ WiFi Protected Setup (WPS): succeeded in enrollee mode"); break;
-    case ARDUINO_EVENT_WPS_ER_FAILED:           Serial.println("+ WiFi Protected Setup (WPS): failed in enrollee mode"); break;
-    case ARDUINO_EVENT_WPS_ER_TIMEOUT:          Serial.println("+ WiFi Protected Setup (WPS): timeout in enrollee mode"); break;
-    case ARDUINO_EVENT_WPS_ER_PIN:              Serial.println("+ WiFi Protected Setup (WPS): pin code in enrollee mode"); break;
-    case ARDUINO_EVENT_WIFI_AP_START:           Serial.println("+ WiFi access point started"); break;
-    case ARDUINO_EVENT_WIFI_AP_STOP:            Serial.println("+ WiFi access point  stopped"); break;
-    case ARDUINO_EVENT_WIFI_AP_STACONNECTED:    Serial.println("+ Client connected"); break;
-    case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED: Serial.println("+ Client disconnected"); break;
-    case ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED:   Serial.println("+ Assigned IP address to client"); break;
-    case ARDUINO_EVENT_WIFI_AP_PROBEREQRECVED:  Serial.println("+ Received probe request"); break;
-    case ARDUINO_EVENT_WIFI_AP_GOT_IP6:         Serial.println("+ AP IPv6 is preferred"); break;
-    case ARDUINO_EVENT_WIFI_STA_GOT_IP6:        Serial.println("+ STA IPv6 is preferred"); break;
+    case ARDUINO_EVENT_WIFI_STA_LOST_IP:        info_logger("+ Lost IP address and IP address is reset to 0"); break;
+    case ARDUINO_EVENT_WPS_ER_SUCCESS:          info_logger("+ WiFi Protected Setup (WPS): succeeded in enrollee mode"); break;
+    case ARDUINO_EVENT_WPS_ER_FAILED:           info_logger("+ WiFi Protected Setup (WPS): failed in enrollee mode"); break;
+    case ARDUINO_EVENT_WPS_ER_TIMEOUT:          info_logger("+ WiFi Protected Setup (WPS): timeout in enrollee mode"); break;
+    case ARDUINO_EVENT_WPS_ER_PIN:              info_logger("+ WiFi Protected Setup (WPS): pin code in enrollee mode"); break;
+    case ARDUINO_EVENT_WIFI_AP_START:           info_logger("+ WiFi access point started"); break;
+    case ARDUINO_EVENT_WIFI_AP_STOP:            info_logger("+ WiFi access point  stopped"); break;
+    case ARDUINO_EVENT_WIFI_AP_STACONNECTED:    info_logger("+ Client connected"); break;
+    case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED: info_logger("+ Client disconnected"); break;
+    case ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED:   info_logger("+ Assigned IP address to client"); break;
+    case ARDUINO_EVENT_WIFI_AP_PROBEREQRECVED:  info_logger("+ Received probe request"); break;
+    case ARDUINO_EVENT_WIFI_AP_GOT_IP6:         info_logger("+ AP IPv6 is preferred"); break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP6:        info_logger("+ STA IPv6 is preferred"); break;
     default:                                    break;
   }
 }
@@ -919,7 +915,7 @@ void system_state_controller() //[OK]
 
   if (!schedule_enabled)
   {
-    debug_logger("Schedule disabled..");
+    debug_logger("Schedule disabled.");
     Sleep = "off";
     return;
   }
