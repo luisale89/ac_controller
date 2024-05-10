@@ -263,7 +263,7 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingData, int len) 
       root["evap_air_in_temp"] = controller_data.evap_air_in_temp;
       root["evap_air_out_temp"] = controller_data.evap_air_out_temp;
       serializeJson(root, payload);
-      info_logger(payload.c_str());
+      debug_logger(payload.c_str());
     }
 
     if (sender_id == MONITOR)
@@ -276,7 +276,7 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingData, int len) 
       root["avg_vapor_press"] = monitor_data.vapor_press[1];
       root["max_vapor_press"] = monitor_data.vapor_press[2];
       serializeJson(root, payload);
-      info_logger(payload.c_str());
+      debug_logger(payload.c_str());
     }
 
     break;
@@ -292,7 +292,7 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingData, int len) 
       if (addPeer(mac_addr) == true){
         info_logger("[esp-now] - sending response to peer with PAIRING data.");
         esp_now_send(mac_addr, (uint8_t *) &pairing_data, sizeof(pairing_data));
-      }; 
+      };
     }
   break;
   default: error_logger("[esp-now] - Invalid DATA type received...");
@@ -308,7 +308,7 @@ switch (event) {
     case ARDUINO_EVENT_WIFI_STA_STOP:            info_logger("WiFi clients stopped"); break;
     case ARDUINO_EVENT_WIFI_STA_CONNECTED:       
       WiFi_channel = WiFi.channel();
-      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Connected to the AP on the channel: %d", WiFi_channel);
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Connected to the AP on channel: %d", WiFi_channel);
       ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "SOFT AP MAC Address: %s", WiFi.softAPmacAddress().c_str());
       ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "STA MAC Address: %s", WiFi.macAddress().c_str());
       break;
@@ -324,19 +324,19 @@ switch (event) {
       ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "IP Address assigned: %s", WiFi.localIP().toString());
 
       break;
-    case ARDUINO_EVENT_WIFI_STA_LOST_IP:        info_logger("+ Lost IP address and IP address is reset to 0"); break;
-    case ARDUINO_EVENT_WPS_ER_SUCCESS:          info_logger("+ WiFi Protected Setup (WPS): succeeded in enrollee mode"); break;
-    case ARDUINO_EVENT_WPS_ER_FAILED:           info_logger("+ WiFi Protected Setup (WPS): failed in enrollee mode"); break;
-    case ARDUINO_EVENT_WPS_ER_TIMEOUT:          info_logger("+ WiFi Protected Setup (WPS): timeout in enrollee mode"); break;
-    case ARDUINO_EVENT_WPS_ER_PIN:              info_logger("+ WiFi Protected Setup (WPS): pin code in enrollee mode"); break;
-    case ARDUINO_EVENT_WIFI_AP_START:           info_logger("+ WiFi access point started"); break;
-    case ARDUINO_EVENT_WIFI_AP_STOP:            info_logger("+ WiFi access point  stopped"); break;
-    case ARDUINO_EVENT_WIFI_AP_STACONNECTED:    info_logger("+ Client connected"); break;
-    case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED: info_logger("+ Client disconnected"); break;
-    case ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED:   info_logger("+ Assigned IP address to client"); break;
-    case ARDUINO_EVENT_WIFI_AP_PROBEREQRECVED:  info_logger("+ Received probe request"); break;
-    case ARDUINO_EVENT_WIFI_AP_GOT_IP6:         info_logger("+ AP IPv6 is preferred"); break;
-    case ARDUINO_EVENT_WIFI_STA_GOT_IP6:        info_logger("+ STA IPv6 is preferred"); break;
+    case ARDUINO_EVENT_WIFI_STA_LOST_IP:        info_logger("Lost IP address and IP address is reset to 0"); break;
+    case ARDUINO_EVENT_WPS_ER_SUCCESS:          info_logger("WiFi Protected Setup (WPS): succeeded in enrollee mode"); break;
+    case ARDUINO_EVENT_WPS_ER_FAILED:           info_logger("WiFi Protected Setup (WPS): failed in enrollee mode"); break;
+    case ARDUINO_EVENT_WPS_ER_TIMEOUT:          info_logger("WiFi Protected Setup (WPS): timeout in enrollee mode"); break;
+    case ARDUINO_EVENT_WPS_ER_PIN:              info_logger("WiFi Protected Setup (WPS): pin code in enrollee mode"); break;
+    case ARDUINO_EVENT_WIFI_AP_START:           info_logger("WiFi access point started"); break;
+    case ARDUINO_EVENT_WIFI_AP_STOP:            info_logger("WiFi access point  stopped"); break;
+    case ARDUINO_EVENT_WIFI_AP_STACONNECTED:    info_logger("Client connected"); break;
+    case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED: info_logger("Client disconnected"); break;
+    case ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED:   info_logger("Assigned IP address to client"); break;
+    case ARDUINO_EVENT_WIFI_AP_PROBEREQRECVED:  info_logger("Received probe request"); break;
+    case ARDUINO_EVENT_WIFI_AP_GOT_IP6:         info_logger("AP IPv6 is preferred"); break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP6:        info_logger("STA IPv6 is preferred"); break;
     default:                                    break;
   }
 }
@@ -344,10 +344,10 @@ switch (event) {
 // Guarda el estado del sistema en spiffs
 void save_operation_state_in_fs() //[OK]
 {
-
+  info_logger("[spiffs] saving operation state in file system.");
   if (!SPIFFS.begin(true))
   {
-    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
+    error_logger("Ocurrió un error al ejecutar SPIFFS.");
     return;
   }
   File f = SPIFFS.open("/Encendido.txt", "w"); // Borra el contenido anterior del archivo
@@ -355,14 +355,9 @@ void save_operation_state_in_fs() //[OK]
   // Mensaje de fallo al leer el contenido
   if (!f)
   {
-    Serial.println("Archivo no existe, creandolo...");
+    error_logger("Error al abrir el archivo solicitado.");
     delay(200);
-    // return;
-  }
-  if (!f)
-  {
-    Serial.println("Error al abrir el archivo");
-    delay(200);
+    return;
   }
   String SEncendido = SysState;
   f.print(SEncendido);
@@ -383,36 +378,38 @@ void update_rtc_from_ntp()
     int segundo = timeinfo.tm_sec;
 
     DS1307_RTC.adjust(DateTime(ano, mes, dia, hora, minuto, segundo));
-    Serial.println("Datetime updated..");
-    Serial.println("Day: " + String(dia) + "-" + String(hora) + ":" + String(minuto));
+    info_logger("RTC DateTime updated!");
+    ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "Day: %s - %s:%s", String(dia).c_str(), String(hora).c_str(), String(minuto).c_str());
   }
   else
   {
-    Serial.println("Could not obtain time info from NTP Server, Skiping RTC update");
+    error_logger("Could not obtain time info from NTP Server, Skiping RTC update");
   }
 }
 
 void timeavailable(struct timeval *tml)
 {
   // this should be called every hour automatically..
-  Serial.println("Got time adjustment from NTP! latest datetime is now available");
+  info_logger("Got time adjustment from NTP! latest datetime is now available");
   update_rtc_from_ntp(); // update RTC with latest time from NTP server.
 }
 
 void save_timectrl_settings_in_fs(bool value, String onCondition, String offCondition) //[OK]
 {
-  String json;
+  info_logger("[spiffs] saving timectrl settings in file system.");
+  String timectrl_setting;
   StaticJsonDocument<96> doc;
 
   doc["value"] = value;
   doc["on_condition"] = onCondition;
   doc["off_condition"] = offCondition;
 
-  serializeJson(doc, json);
+  serializeJson(doc, timectrl_setting);
+  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "data to save in filesystem: %s", timectrl_setting.c_str());
 
   if (!SPIFFS.begin(true))
   {
-    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
+    error_logger("Ocurrió un error al ejecutar SPIFFS.");
     return;
   }
   File f = SPIFFS.open("/Settings.txt", "w"); // Borra el contenido anterior del archivo
@@ -420,24 +417,20 @@ void save_timectrl_settings_in_fs(bool value, String onCondition, String offCond
   // Mensaje de fallo al leer el contenido
   if (!f)
   {
-    Serial.println("Archivo no existe, creandolo...");
+    error_logger("Error al abrir el archivo solicitado.");
     delay(200);
-    // return;
+    return;
   }
-  if (!f)
-  {
-    Serial.println("Error al abrir el archivo");
-    delay(200);
-  }
-  f.print(json);
+  f.print(timectrl_setting);
   f.close();
 }
 
 void load_timectrl_settings_from_fs() //[OK]
 {
+  info_logger("[spiffs] loading timectrl settings from file system.");
   if (!SPIFFS.begin(true))
   {
-    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
+    error_logger("Ocurrió un error al ejecutar SPIFFS.");
     return;
   }
 
@@ -446,20 +439,18 @@ void load_timectrl_settings_from_fs() //[OK]
   // Mensaje de fallo al leer el contenido
   if (!f)
   {
-    Serial.println("Error al abrir el archivo.");
+    error_logger("Error al abrir el archivo solicitado.");
     return;
   }
   String Settings = f.readString();
+  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "data loaded from file: %s", Settings.c_str());
   // String input;
-
   StaticJsonDocument<128> doc1;
-
   DeserializationError error = deserializeJson(doc1, Settings);
 
   if (error)
   {
-    Serial.print("deserializeJson() failed: ");
-    Serial.println(error.c_str());
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
     return;
   }
 
@@ -474,7 +465,6 @@ void load_timectrl_settings_from_fs() //[OK]
 // Guarda el horario de apgado de cada dia
 void save_schedule_in_fs(int HON, int HOFF, String Day, bool enable) //[OK]
 {
-
   String Hours;
   StaticJsonDocument<96> doc;
 
@@ -483,25 +473,19 @@ void save_schedule_in_fs(int HON, int HOFF, String Day, bool enable) //[OK]
   doc["enable"] = enable;
 
   serializeJson(doc, Hours);
+  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "%s schedule to save in fs: %s", Day.c_str(), Hours.c_str());
 
   if (!SPIFFS.begin(true))
   {
-    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
+    error_logger("Ocurrió un error al ejecutar SPIFFS.");
     return;
   }
   File f = SPIFFS.open("/" + Day + ".txt", "w"); // Borra el contenido anterior del archivo
-
-  // Mensaje de fallo al leer el contenido
   if (!f)
   {
-    Serial.println("Archivo no existe, creandolo...");
+    error_logger("Error al abrir el archivo solicitado.");
     delay(200);
-    // return;
-  }
-  if (!f)
-  {
-    Serial.println("Error al abrir el archivo");
-    delay(200);
+    return;
   }
   f.print(Hours);
   f.close();
@@ -510,6 +494,7 @@ void save_schedule_in_fs(int HON, int HOFF, String Day, bool enable) //[OK]
 // Aqui se guardan la configuracion del modo Auto que llega en el topico
 void save_auto_config_in_fs(int wait, int temp)
 {
+  info_logger("[spiffs] saving auto-mode settings in file system.");
   StaticJsonDocument<32> doc;
   String output;
 
@@ -517,9 +502,11 @@ void save_auto_config_in_fs(int wait, int temp)
   doc["temp"] = temp;
 
   serializeJson(doc, output);
+  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "data to save in fs: %s", output.c_str());
+
   if (!SPIFFS.begin(true))
   {
-    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
+    error_logger("Ocurrió un error al ejecutar SPIFFS.");
     return;
   }
   File f = SPIFFS.open("/Auto.txt", "w"); // Borra el contenido anterior del archivo
@@ -527,14 +514,9 @@ void save_auto_config_in_fs(int wait, int temp)
   // Mensaje de fallo al leer el contenido
   if (!f)
   {
-    Serial.println("Archivo no existe, creandolo...");
+    error_logger("Error al abrir el archivo");
     delay(200);
-    // return;
-  }
-  if (!f)
-  {
-    Serial.println("Error al abrir el archivo");
-    delay(200);
+    return;
   }
   f.println(output);
   f.close();
@@ -545,9 +527,10 @@ void save_auto_config_in_fs(int wait, int temp)
 // Aqui se guarda el modo que llega desde el topico
 void save_operation_mode_in_fs(String Modo) //[OK]
 {
+  info_logger("[spiffs] saving operation mode in file system.");
   if (!SPIFFS.begin(true))
   {
-    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
+    error_logger("Ocurrió un error al ejecutar SPIFFS.");
     return;
   }
   File f = SPIFFS.open("/Modo.txt", "w"); // Borra el contenido anterior del archivo
@@ -555,14 +538,9 @@ void save_operation_mode_in_fs(String Modo) //[OK]
   // Mensaje de fallo al leer el contenido
   if (!f)
   {
-    Serial.println("Archivo no existe, creandolo...");
+    error_logger("Error al abrir el archivo");
     delay(200);
-    // return;
-  }
-  if (!f)
-  {
-    Serial.println("Error al abrir el archivo");
-    delay(200);
+    return;
   }
   f.print(Modo);
   f.close();
@@ -573,14 +551,11 @@ void save_operation_mode_in_fs(String Modo) //[OK]
 void process_op_state_from_broker(String json) //[NEW, OK]
 {
   // String input;
-
   StaticJsonDocument<96> doc;
-
   DeserializationError error = deserializeJson(doc, json);
   if (error)
   {
-    Serial.print("deserializeJson() failed: ");
-    Serial.println(error.c_str());
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
     return;
   }
   String variable = doc["variable"]; // "system_state"
@@ -592,7 +567,7 @@ void process_op_state_from_broker(String json) //[NEW, OK]
   }
   else
   {
-    Serial.println("Error: invalid value received from broker on -system_state-");
+    error_logger("Error: invalid value received from broker on -system_state-");
   }
   save_operation_state_in_fs();
 }
@@ -600,9 +575,10 @@ void process_op_state_from_broker(String json) //[NEW, OK]
 // Establece el encendido o apagado al inicio
 void load_operation_state_from_fs() //[OK]
 {
+  info_logger("[spiffs] loading operation state from fs");
   if (!SPIFFS.begin(true))
   {
-    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
+    error_logger("Ocurrió un error al ejecutar SPIFFS.");
     return;
   }
 
@@ -611,7 +587,7 @@ void load_operation_state_from_fs() //[OK]
   // Mensaje de fallo al leer el contenido
   if (!file)
   {
-    Serial.println("Error al abrir el archivo.");
+    error_logger("Error al abrir el archivo.");
     return;
   }
   String ESave = file.readString();
@@ -620,23 +596,23 @@ void load_operation_state_from_fs() //[OK]
   if (ESave == "on" || ESave == "off" || ESave == "sleep")
   {
     SysState = ESave;
+    ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "system state loaded from fs: %s", ESave.c_str());
   }
   else
   {
-    Serial.println("Error: Bad value stored in Encendido.txt");
+    error_logger("Error: Bad value stored in Encendido.txt");
   }
-
   return;
 }
 
 // Funcion que asigna las temperaturas predeterminadas a las variables globales
 void load_temp_setpoint_from_fs()
 {
-
+  info_logger("loading NORMAL temp. setpoint from fs");
   // Temperatura SetPoint
   if (!SPIFFS.begin(true))
   {
-    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
+    error_logger("Ocurrió un error al ejecutar SPIFFS.");
     return;
   }
 
@@ -645,41 +621,37 @@ void load_temp_setpoint_from_fs()
   // Mensaje de fallo al leer el contenido
   if (!file)
   {
-    Serial.println("Error al abrir el archivo.");
+    error_logger("Error al abrir el archivo.");
     return;
   }
   String ReadTemp = file.readString();
-
   SelectTemp = ReadTemp.toFloat();
   file.close();
   CurrentSysTemp = SelectTemp;
+  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "NORMAL Temp. loaded: %3.2f °C", CurrentSysTemp);
 
   // Temperatura en Auto
-
+  info_logger("loading AUTO setpoints from fs");
   if (!SPIFFS.begin(true))
   {
-    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
+    error_logger("Ocurrió un error al ejecutar SPIFFS.");
     return;
   }
 
   File f = SPIFFS.open("/Auto.txt");
-
   // Mensaje de fallo al leer el contenido
   if (!f)
   {
-    Serial.println("Error al abrir el archivo.");
+    error_logger("Error al abrir el archivo.");
     return;
   }
   String AutoSetUp = f.readString();
-
   StaticJsonDocument<64> doc;
-
   DeserializationError error = deserializeJson(doc, AutoSetUp);
 
   if (error)
   {
-    Serial.print("deserializeJson() failed: ");
-    Serial.println(error.c_str());
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
     return;
   }
 
@@ -687,16 +659,18 @@ void load_temp_setpoint_from_fs()
   AutoTimeOut = (unsigned long)wait * 60000L;
   AutoTemp = doc["temp"]; // 24
 
+  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "Auto setpoints loaded = wait: %d min., temp: %3.2f °C", wait, AutoTemp);
   f.close();
 }
 
 // Funcion que asigna el Modo almacenado a una variable local [x]
 void load_operation_mode_from_fs() //[OK]
 {
+  info_logger("loading operation mode from fs");
   // Temperatura SetPoint
   if (!SPIFFS.begin(true))
   {
-    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
+    error_logger("Ocurrió un error al ejecutar SPIFFS.");
     return;
   }
 
@@ -705,36 +679,34 @@ void load_operation_mode_from_fs() //[OK]
   // Mensaje de fallo al leer el contenido
   if (!file)
   {
-    Serial.println("Error al abrir el archivo.");
+    error_logger("Error al abrir el archivo.");
     return;
   }
   String ReadModo = file.readString();
 
   SysMode = ReadModo;
+  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "operation mode loaded: %s", SysMode);
+
   file.close();
 }
 
 // Guarda la configuracion que se envia en el topico
 void process_settings_from_broker(String json) //[OK]
 {
-
   StaticJsonDocument<768> doc;
-
   DeserializationError error = deserializeJson(doc, json);
 
   if (error)
   {
-    Serial.print("deserializeJson() failed: ");
-    Serial.println(error.c_str());
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
     return;
   }
 
   const char *variable = doc["variable"]; // "timectrl"
-  Serial.println(variable);
 
   if (String(variable) == "timectrl")
   {
-
+    info_logger("timectrl settings adjustment.");
     // Aqui hay que guardar la configuracion del control de apagado encendido
     // Cambia el horario de encendido o apagado
     bool value = doc["enabled"];                //
@@ -753,13 +725,13 @@ void process_settings_from_broker(String json) //[OK]
       int schedule_item_value_on = schedule_item.value()["on"];
       int schedule_item_value_off = schedule_item.value()["off"];
       bool schedule_item_value_enabled = schedule_item.value()["enabled"]; // true
-      Serial.println(Day);
       // String input;, false, true, true, true, ...
       save_schedule_in_fs(schedule_item_value_on, schedule_item_value_off, Day, schedule_item_value_enabled);
     }
   }
   else if (String(variable) == "mode_config")
   {
+    info_logger("auto mode configuration settings.");
     // Cambia la configuracion del modo
     const char *value = doc["value"]; // "auto"
     int wait = doc["wait"];           // 1234
@@ -768,6 +740,7 @@ void process_settings_from_broker(String json) //[OK]
   }
   else if (String(variable) == "system_mode")
   {
+    info_logger("system operation mode settings");
     // Cambia el modo de operacion
     String value = doc["value"]; // "cool"
     save_operation_mode_in_fs(value);
@@ -777,24 +750,22 @@ void process_settings_from_broker(String json) //[OK]
 // Guarda el Setpoint en SPIFF
 void process_temp_sp_from_broker(String json) //[OK]
 {
-
   StaticJsonDocument<96> doc;
-
   DeserializationError error = deserializeJson(doc, json);
 
   if (error)
   {
-    Serial.print("deserializeJson() failed: ");
-    Serial.println(error.c_str());
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
     return;
   }
 
   String variable = doc["variable"]; // "user_setpoint"
   int value = doc["value"];          // 24
+  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "Temp. sp received: %d °C", value);
 
   if (!SPIFFS.begin(true))
   {
-    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
+    error_logger("Ocurrió un error al ejecutar SPIFFS.");
     return;
   }
   File f = SPIFFS.open("/temp.txt", "w"); // Borra el contenido anterior del archivo
@@ -802,14 +773,9 @@ void process_temp_sp_from_broker(String json) //[OK]
   // Mensaje de fallo al leer el contenido
   if (!f)
   {
-    Serial.println("Archivo no existe, creandolo...");
+    error_logger("Error al abrir el archivo");
     delay(200);
-    // return;
-  }
-  if (!f)
-  {
-    Serial.println("Error al abrir el archivo");
-    delay(200);
+    return;
   }
   f.print(value);
   SelectTemp = value;
@@ -819,43 +785,40 @@ void process_temp_sp_from_broker(String json) //[OK]
 // Funcion que recibe la data de Tago por MQTT
 void mqtt_message_callback(char *topicp, byte *payload, unsigned int length) //[OK]
 {
-  digitalWrite(NETWORK_LED, LOW);
-  Serial.print("$ Message arrived in topic: ");
-  Serial.println(topicp);
-  Serial.print("* Message:");
+  String topic = String(topicp);
   String Mensaje;
+  //begin.
+  digitalWrite(NETWORK_LED, LOW);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "$ MQTT Message arrived on topic: %s", topic.c_str());
   for (int i = 0; i < length; i++)
   {
-
-    Serial.print((char)payload[i]);
-
     Mensaje = Mensaje + (char)payload[i];
   }
-  Serial.println("Este es el mensaje " + Mensaje);
+  //print message in logger.
+  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "+ Message: %s", Mensaje.c_str());
 
   // Selecciona la funcion acorde al topico al cual llego el mensaje
-  if (String(topicp) == "system/operation/settings")
+  if (topic == "system/operation/settings")
   {
     // Cambia la configuracion del sistema
-    Serial.println("-Settings-");
+    info_logger("processing settings received from broker");
     process_settings_from_broker(Mensaje);
   }
-  else if (String(topicp) == "system/operation/state")
+  else if (topic == "system/operation/state")
   {
     // Apaga o enciende el sistema
-    Serial.println("-System State-");
+    info_logger("processing operation state received from broker");
     process_op_state_from_broker(Mensaje);
   }
-  else if (String(topicp) == "system/operation/setpoint")
+  else if (topic == "system/operation/setpoint")
   {
     // Ajusta la temperatura del ambiente
-    Serial.println("-Setpoint-");
+    info_logger("processing temp. setpoint received from broker");
     process_temp_sp_from_broker(Mensaje);
   }
-
-  Serial.println();
-  Serial.println("-----------------------");
-  Mensaje = "";
+  else {
+    error_logger("mqtt topic not implemented.");
+  }
 
   // Levanta el Flag para envio de datos
   delay(100);
@@ -946,8 +909,7 @@ void system_state_controller() //[OK]
 
   if (error)
   {
-    error_logger("deserializeJson() failed: ");
-    error_logger(error.c_str());
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
     return;
   }
 
@@ -1143,9 +1105,10 @@ void update_relay_outputs() //[ok]
 // carga los datos de la red wifi desde el spiffs.
 void load_wifi_data_from_fs()
 {
+  info_logger("loading WiFi data from fs.");
   if (!SPIFFS.begin(true))
   {
-    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
+    error_logger("Ocurrió un error al ejecutar SPIFFS.");
     return;
   }
 
@@ -1154,7 +1117,7 @@ void load_wifi_data_from_fs()
   // Mensaje de fallo al leer el contenido
   if (!f)
   {
-    Serial.println("Error al abrir el archivo.");
+    error_logger("Error al abrir el archivo.");
     return;
   }
   String wifi_data = f.readString();
@@ -1165,14 +1128,13 @@ void load_wifi_data_from_fs()
 
   if (error)
   {
-    Serial.print("deserializeJson() failed: ");
-    Serial.println(error.c_str());
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
     return;
   }
 
   String ESID = doc1["ssid"];
   String PW = doc1["pass"];
-
+  
   esid = ESID;
   epass = PW;
   f.close();
@@ -1182,18 +1144,17 @@ void load_wifi_data_from_fs()
 // guarda la configuración wifi recibida por smartConfig
 void save_wifi_data_in_fs()
 {
+  info_logger("Saving WiFi data in fs");
   StaticJsonDocument<256> doc;
   String output;
 
   doc["ssid"] = WiFi.SSID();
   doc["pass"] = WiFi.psk();
 
-  Serial.println("-> Saving WiFi data in spiffs: ");
-
   serializeJson(doc, output);
   if (!SPIFFS.begin(true))
   {
-    Serial.println("Ocurrió un error al ejecutar SPIFFS.");
+    error_logger("Ocurrió un error al ejecutar SPIFFS.");
     return;
   }
   File f = SPIFFS.open("/WiFi.txt", "w"); // Borra el contenido anterior del archivo
@@ -1201,7 +1162,7 @@ void save_wifi_data_in_fs()
   // Mensaje de fallo al leer el contenido
   if (!f)
   {
-    Serial.println("Archivo no existe, debe crearlo...");
+    error_logger("Error al abrir el archivo...");
     delay(200);
     return;
   }
@@ -1216,33 +1177,29 @@ void wifiloop() //[ok]
   // only wait for SmartConfig when the AP button is pressed.
   if ((digitalRead(AP_BUTTON) == 0))
   {
-    Serial.println("* the AP button has been pressed, setting up new wifi network*");
-    Serial.println("- Waiting for SmartConfig...");
+    info_logger("* the AP button has been pressed, setting up new wifi network*");
+    info_logger("- Waiting for SmartConfig...");
     WiFi.disconnect();
     WiFi.beginSmartConfig();
 
     while (!WiFi.smartConfigDone())
     {
-      Serial.print(".");
       network_led_state = (network_led_state == LOW) ? HIGH : LOW;
       digitalWrite(NETWORK_LED, network_led_state);
       delay(500); //wait for smart config to arrive.
     }
-    Serial.println("");
-    Serial.println("-> SmartConfig received!");
-    Serial.print("-> Testing new WiFi credentials...");
+    info_logger("SmartConfig received!");
+    info_logger("Testing new WiFi credentials...");
 
     // test wifi credentials received.
     while (WiFi.status() != WL_CONNECTED)
     {
-      Serial.print(".");
       network_led_state = (network_led_state == LOW) ? HIGH : LOW;
       digitalWrite(NETWORK_LED, network_led_state);
       delay(500);
     }
 
-    Serial.println("");
-    Serial.print("-> Connected to new WiFi network! smart config finished..");
+    info_logger("-> Connected to new WiFi network! smart config finished..");
     // save wifi credential in filesystem.
     save_wifi_data_in_fs();
   }
@@ -1255,34 +1212,33 @@ void wifiloop() //[ok]
     if ((!mqtt_client.connected()) && (millis() - lastMqttReconnect >= mqttReconnectInterval))
     {
       // connecting to a mqtt broker
-      Serial.println("* MQTT broker connection attempt..");
+      info_logger("* MQTT broker connection attempt..");
       lastMqttReconnect = millis();
       String client_id = "esp32-mqtt_client-";
       client_id += String(WiFi.macAddress());
-      Serial.printf("- mqtt_client-id: %s\n", client_id.c_str());
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "mqtt client id: %s", client_id.c_str());
       digitalWrite(NETWORK_LED, HIGH); //led pulse begin...
       // Try mqtt connection to the broker.
       if (mqtt_client.connect(client_id.c_str(), mqtt_username, mqtt_password, willTopic, willQoS, willRetain, willMessage))
       {
-        Serial.printf("- Connected to MQTT broker: %s\n", mqtt_broker);
+        info_logger("+ Connected to MQTT broker!");
         // Publish and subscribe
-        Serial.println("- Subscribing to mqtt topics:");
+        info_logger("- Subscribing to mqtt topics:");
         mqtt_client.subscribe(topic);
-        Serial.println("# Topic 1 ok");
+        info_logger("# Topic 1 ok");
         delay(1000);
         mqtt_client.subscribe(topic_2);
-        Serial.println("# Topic 2 ok");
+        info_logger("# Topic 2 ok");
         delay(1000);
         mqtt_client.subscribe(topic_3);
-        Serial.println("# Topic 3 ok");
+        info_logger("# Topic 3 ok");
         lastSaluteTime = millis();
         Salute = false; // flag to send connection message
-        Serial.println("** MQTT settings done. **");
+        info_logger("** MQTT connection done. **");
       }
       else
       {
-        Serial.print("- Failed MQTT connection with state: ");
-        Serial.println(mqtt_client.state());
+        ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "-- Fail MQTT Connection with state: %d", mqtt_client.state());
         digitalWrite(NETWORK_LED, LOW); // led pulse end...
         return;
       }
@@ -1292,7 +1248,7 @@ void wifiloop() //[ok]
     {
       mqtt_client.publish("device/hello", "connected");
       Salute = true;
-      Serial.println("** MQTT \"Salute\" message sent");
+      info_logger("** MQTT \"Salute\" message sent");
     }
     return;
   }
@@ -1430,7 +1386,6 @@ void send_data_to_broker() //[ok]
   serializeJson(doc, output);
   info_logger("Publishing system variables to mqtt broker.");
   ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "Message: %s", output.c_str());
-  // Serial.println(output);
   bool mqtt_msg_sent = mqtt_client.publish("tago/data/post", output.c_str());
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "MQTT publish result: %s", mqtt_msg_sent ? "message sent!" : "fail");
 
