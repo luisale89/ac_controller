@@ -89,8 +89,12 @@ TaskHandle_t Task1;
 // WIFI VARIABLES
 String esid = "";
 String epass = "";
+String AP_SSID = "HVAC-CONTROLLER";
+String AP_PASS = "random-password-here";
 WiFiClient espClient;
 PubSubClient mqtt_client(espClient);
+int wifi_reconnect_attempt = 0;
+const int MAX_RECONNECT_ATTEMPTS = 33; // three times on every channel.
 
 // RTC
 RTC_DS1307 DS1307_RTC;
@@ -120,14 +124,16 @@ const int daylightOffset_sec = 0;
 
 // ESP-NOW VARS
 esp_now_peer_info_t slave;
-uint8_t WiFi_channel = 1;
+int32_t WiFi_channel = 1;
 
 enum MessageType {PAIRING, DATA,};
 enum SenderID {SERVER, CONTROLLER, MONITOR,};
 enum SystemModes {SYS_OFF, SYS_FAN, SYS_COOL, SYS_AUTO_CL,};
-MessageType espnow_msg_type;
-SystemModes espnow_system_mode;
-SenderID espnow_peer_id;
+enum WiFiModeState {ESPNOW_OFFLINE, ESPNOW_ONLINE, ESPNOW_IDLE};
+WiFiModeState espnow_connection_state = ESPNOW_IDLE;
+// MessageType espnow_msg_type;
+// SystemModes espnow_system_mode;
+// SenderID espnow_peer_id;
 
 typedef struct pairing_data_struct {
   uint8_t msg_type;             // (1 byte)
@@ -212,39 +218,46 @@ bool addPeer(const uint8_t *peer_addr) {      // add pairing
   bool exists = esp_now_is_peer_exist(slave.peer_addr);
   if (exists) {
     // Slave already paired.
-    info_logger("[esp-now] peer already exists.");
+    info_logger("[esp-now] peer already exists, deleting existing peer.");
+    esp_err_t delStatus = esp_now_del_peer(peer_addr);
+    if (delStatus == ESP_OK) {
+      info_logger("[esp-now] peer deleted!");
+    } else {
+      error_logger("[esp-now] error deleting peer!");
+    }
+  }
+  esp_err_t addStatus = esp_now_add_peer(peer);
+  if (addStatus == ESP_OK) {
+    // Pair success
+    info_logger("[esp-now] new peer added successfully.");
     return true;
   }
-  else {
-    esp_err_t addStatus = esp_now_add_peer(peer);
-    if (addStatus == ESP_OK) {
-      // Pair success
-      info_logger("[esp-now] new peer added successfully.");
-      return true;
-    }
-    else
-    {
-      ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[esp-now] Error: %d, while adding new peer.", addStatus);
-      return false;
-    }
+  else
+  {
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[esp-now] Error: %d, while adding new peer.", addStatus);
+    return false;
   }
-} 
+}
 
 // callback when data is sent
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
   String printable_mac_address = printMAC(mac_addr);
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] packet sent to: %s", printable_mac_address.c_str());
   if (status == ESP_NOW_SEND_SUCCESS) {
-    error_logger("[esp-now] delivery success.");
+    info_logger("[esp-now] delivery success.");
   } else {
-    info_logger("[esp-now] delivery fail.");
+    error_logger("[esp-now] delivery fail.");
   }
 }
 
 
-void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingData, int len) { 
+void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len) { 
   String printable_mac_address = printMAC(mac_addr);
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] %d bytes of data received from: %s", len, printable_mac_address.c_str());
+  if (espnow_connection_state == ESPNOW_IDLE) {
+    info_logger("[esp-now] Waiting to finish AP connection. Ignoring Data..");
+    return;
+  }
   StaticJsonDocument<512> root;
   String payload;
   uint8_t type = incomingData[0];       // first message byte is the type of message 
@@ -290,53 +303,87 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingData, int len) 
       WiFi.softAPmacAddress(pairing_data.macAddr);   
       pairing_data.channel = WiFi_channel; // current WiFi_channel value.
       if (addPeer(mac_addr) == true){
-        info_logger("[esp-now] - sending response to peer with PAIRING data.");
-        esp_now_send(mac_addr, (uint8_t *) &pairing_data, sizeof(pairing_data));
+        info_logger("[esp-now] sending response to peer with PAIRING data.");
+        esp_err_t send_result = esp_now_send(mac_addr, (uint8_t *) &pairing_data, sizeof(pairing_data));
+        if (send_result ==  ESP_OK) {
+          info_logger("[esp-now] respnse sent.");
+        } else {
+          ESP_LOG_LEVEL(ESP_LOG_WARN, TAG, "[esp-now] error sending pairing msg to peer, reason: %d", send_result);
+        }
       };
     }
   break;
-  default: error_logger("[esp-now] - Invalid DATA type received...");
+  default: error_logger("[esp-now] Invalid DATA type received...");
   }
 }
 
+void set_AP_for_ESPNOW_offline_mode() {
+  // this function allows offline esp-now communication, in case of getting disconnected from the WiFi network.
+  info_logger("[wifi] Setting up to communicate over esp_now while device is offline.");
+  WiFi.disconnect();
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] channel: %d", WiFi.channel());
+  WiFi_channel = WiFi.channel();
+  WiFi.softAP(AP_SSID.c_str(), AP_PASS.c_str(), WiFi_channel, 1); //channel, hidden ssid
+  espnow_connection_state = ESPNOW_OFFLINE;
+  return;
+}
+
+void test_AP_for_ESPNOW_online_mode(){
+  info_logger("[wifi] Setting up to communicate over esp_now while device is online.");
+  WiFi.begin(esid.c_str(), epass.c_str());
+  wifi_reconnect_attempt = 0;
+}
+
+
 void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[WiFi event] code: %d", event);
-switch (event) {
-    case ARDUINO_EVENT_WIFI_READY:               info_logger("WiFi interface ready"); break;
-    case ARDUINO_EVENT_WIFI_SCAN_DONE:           info_logger("Completed scan for access points"); break;
-    case ARDUINO_EVENT_WIFI_STA_START:           info_logger("WiFi client started"); break;
-    case ARDUINO_EVENT_WIFI_STA_STOP:            info_logger("WiFi clients stopped"); break;
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] event code: %d", event);
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_READY:               info_logger("[wifi] interface ready"); break;
+    case ARDUINO_EVENT_WIFI_SCAN_DONE:           info_logger("[wifi] Completed scan for access points"); break;
+    case ARDUINO_EVENT_WIFI_STA_START:           info_logger("[wifi] Client started"); break;
+    case ARDUINO_EVENT_WIFI_STA_STOP:            info_logger("[wifi] Clients stopped"); break;
     case ARDUINO_EVENT_WIFI_STA_CONNECTED:       
       WiFi_channel = WiFi.channel();
-      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Connected to the AP on channel: %d", WiFi_channel);
-      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "SOFT AP MAC Address: %s", WiFi.softAPmacAddress().c_str());
-      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "STA MAC Address: %s", WiFi.macAddress().c_str());
+      espnow_connection_state = ESPNOW_ONLINE;
+      wifi_reconnect_attempt = 0;
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] Connected to the AP on channel: %d", WiFi_channel);
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] RSSI: %d", WiFi.RSSI());
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] SOFT AP MAC Address: %s", WiFi.softAPmacAddress().c_str());
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] STA MAC Address: %s", WiFi.macAddress().c_str());
       break;
 
-    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:    
-      info_logger("Disconnected from WiFi access point"); 
-      info_logger("Trying to reconnect...");
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      if (wifi_reconnect_attempt > MAX_RECONNECT_ATTEMPTS) {
+        info_logger("[wifi] reached max_reconnect_attempts, setting up device for esp_now communication.");
+        set_AP_for_ESPNOW_offline_mode();
+        break;
+      }
+      wifi_reconnect_attempt ++;
+      info_logger("[wifi] Disconnected from WiFi Access Point"); 
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] lost connection. Reason code: %d", info.wifi_sta_disconnected.reason);
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] Reconnect attempt # %d..", wifi_reconnect_attempt);
+      espnow_connection_state = ESPNOW_IDLE;
       WiFi.reconnect();
       break;
 
-    case ARDUINO_EVENT_WIFI_STA_AUTHMODE_CHANGE: info_logger("+ Authentication mode of access point has changed"); break;
+    case ARDUINO_EVENT_WIFI_STA_AUTHMODE_CHANGE: info_logger("[wifi] Authentication mode of access point has changed"); break;
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "IP Address assigned: %s", WiFi.localIP().toString());
-
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] IP Address assigned: %s", WiFi.localIP().toString());
       break;
-    case ARDUINO_EVENT_WIFI_STA_LOST_IP:        info_logger("Lost IP address and IP address is reset to 0"); break;
-    case ARDUINO_EVENT_WPS_ER_SUCCESS:          info_logger("WiFi Protected Setup (WPS): succeeded in enrollee mode"); break;
-    case ARDUINO_EVENT_WPS_ER_FAILED:           info_logger("WiFi Protected Setup (WPS): failed in enrollee mode"); break;
-    case ARDUINO_EVENT_WPS_ER_TIMEOUT:          info_logger("WiFi Protected Setup (WPS): timeout in enrollee mode"); break;
-    case ARDUINO_EVENT_WPS_ER_PIN:              info_logger("WiFi Protected Setup (WPS): pin code in enrollee mode"); break;
-    case ARDUINO_EVENT_WIFI_AP_START:           info_logger("WiFi access point started"); break;
-    case ARDUINO_EVENT_WIFI_AP_STOP:            info_logger("WiFi access point  stopped"); break;
-    case ARDUINO_EVENT_WIFI_AP_STACONNECTED:    info_logger("Client connected"); break;
-    case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED: info_logger("Client disconnected"); break;
-    case ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED:   info_logger("Assigned IP address to client"); break;
-    case ARDUINO_EVENT_WIFI_AP_PROBEREQRECVED:  info_logger("Received probe request"); break;
-    case ARDUINO_EVENT_WIFI_AP_GOT_IP6:         info_logger("AP IPv6 is preferred"); break;
-    case ARDUINO_EVENT_WIFI_STA_GOT_IP6:        info_logger("STA IPv6 is preferred"); break;
+
+    case ARDUINO_EVENT_WIFI_STA_LOST_IP:        info_logger("[wifi] Lost IP address and IP address is reset to 0"); break;
+    case ARDUINO_EVENT_WPS_ER_SUCCESS:          info_logger("[wifi] Protected Setup (WPS): succeeded in enrollee mode"); break;
+    case ARDUINO_EVENT_WPS_ER_FAILED:           info_logger("[wifi] Protected Setup (WPS): failed in enrollee mode"); break;
+    case ARDUINO_EVENT_WPS_ER_TIMEOUT:          info_logger("[wifi] Protected Setup (WPS): timeout in enrollee mode"); break;
+    case ARDUINO_EVENT_WPS_ER_PIN:              info_logger("[wifi] Protected Setup (WPS): pin code in enrollee mode"); break;
+    case ARDUINO_EVENT_WIFI_AP_START:           info_logger("[wifi] access point started"); break;
+    case ARDUINO_EVENT_WIFI_AP_STOP:            info_logger("[wifi] access point stopped"); break;
+    case ARDUINO_EVENT_WIFI_AP_STACONNECTED:    info_logger("[wifi] Client connected"); break;
+    case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED: info_logger("[wifi] Client disconnected"); break;
+    case ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED:   info_logger("[wifi] Assigned IP address to client"); break;
+    case ARDUINO_EVENT_WIFI_AP_PROBEREQRECVED:  info_logger("[wifi] Received probe request"); break;
+    case ARDUINO_EVENT_WIFI_AP_GOT_IP6:         info_logger("[wifi] AP IPv6 is preferred"); break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP6:        info_logger("[wifi] STA IPv6 is preferred"); break;
     default:                                    break;
   }
 }
@@ -347,7 +394,7 @@ void save_operation_state_in_fs() //[OK]
   info_logger("[spiffs] saving operation state in file system.");
   if (!SPIFFS.begin(true))
   {
-    error_logger("Ocurrió un error al ejecutar SPIFFS.");
+    error_logger("[spiffs] Ocurrió un error al ejecutar SPIFFS.");
     return;
   }
   File f = SPIFFS.open("/Encendido.txt", "w"); // Borra el contenido anterior del archivo
@@ -355,7 +402,7 @@ void save_operation_state_in_fs() //[OK]
   // Mensaje de fallo al leer el contenido
   if (!f)
   {
-    error_logger("Error al abrir el archivo solicitado.");
+    error_logger("[spiffs] Error al abrir el archivo solicitado.");
     delay(200);
     return;
   }
@@ -378,19 +425,19 @@ void update_rtc_from_ntp()
     int segundo = timeinfo.tm_sec;
 
     DS1307_RTC.adjust(DateTime(ano, mes, dia, hora, minuto, segundo));
-    info_logger("RTC DateTime updated!");
-    ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "Day: %s - %s:%s", String(dia).c_str(), String(hora).c_str(), String(minuto).c_str());
+    info_logger("[RTC] DateTime updated!");
+    ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "[RTC] Day: %s - %s:%s", String(dia).c_str(), String(hora).c_str(), String(minuto).c_str());
   }
   else
   {
-    error_logger("Could not obtain time info from NTP Server, Skiping RTC update");
+    error_logger("[RTC] Could not obtain time info from NTP Server, Skiping RTC update");
   }
 }
 
 void timeavailable(struct timeval *tml)
 {
   // this should be called every hour automatically..
-  info_logger("Got time adjustment from NTP! latest datetime is now available");
+  info_logger("[RTC] Got time adjustment from NTP! latest datetime is now available");
   update_rtc_from_ntp(); // update RTC with latest time from NTP server.
 }
 
@@ -1105,10 +1152,10 @@ void update_relay_outputs() //[ok]
 // carga los datos de la red wifi desde el spiffs.
 void load_wifi_data_from_fs()
 {
-  info_logger("loading WiFi data from fs.");
+  info_logger("[spiffs] loading WiFi data from fs.");
   if (!SPIFFS.begin(true))
   {
-    error_logger("Ocurrió un error al ejecutar SPIFFS.");
+    error_logger("[spiffs] Ocurrió un error al ejecutar SPIFFS.");
     return;
   }
 
@@ -1117,7 +1164,7 @@ void load_wifi_data_from_fs()
   // Mensaje de fallo al leer el contenido
   if (!f)
   {
-    error_logger("Error al abrir el archivo.");
+    error_logger("[spiffs] Error al abrir el archivo.");
     return;
   }
   String wifi_data = f.readString();
@@ -1128,7 +1175,7 @@ void load_wifi_data_from_fs()
 
   if (error)
   {
-    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[JSON] Deserialization error raised with code: %s", error.c_str());
     return;
   }
 
@@ -1144,7 +1191,7 @@ void load_wifi_data_from_fs()
 // guarda la configuración wifi recibida por smartConfig
 void save_wifi_data_in_fs()
 {
-  info_logger("Saving WiFi data in fs");
+  info_logger("[spiffs] Saving WiFi data in fs");
   StaticJsonDocument<256> doc;
   String output;
 
@@ -1154,7 +1201,7 @@ void save_wifi_data_in_fs()
   serializeJson(doc, output);
   if (!SPIFFS.begin(true))
   {
-    error_logger("Ocurrió un error al ejecutar SPIFFS.");
+    error_logger("[spiffs] Ocurrió un error al ejecutar SPIFFS.");
     return;
   }
   File f = SPIFFS.open("/WiFi.txt", "w"); // Borra el contenido anterior del archivo
@@ -1162,12 +1209,13 @@ void save_wifi_data_in_fs()
   // Mensaje de fallo al leer el contenido
   if (!f)
   {
-    error_logger("Error al abrir el archivo...");
+    error_logger("[spiffs] Error al abrir el archivo...");
     delay(200);
     return;
   }
   f.println(output);
   f.close();
+  info_logger("[spiffs] WiFi data saved!");
   return;
 }
 
@@ -1177,8 +1225,8 @@ void wifiloop() //[ok]
   // only wait for SmartConfig when the AP button is pressed.
   if ((digitalRead(AP_BUTTON) == 0))
   {
-    info_logger("* the AP button has been pressed, setting up new wifi network*");
-    info_logger("- Waiting for SmartConfig...");
+    info_logger("[wifi] the AP button has been pressed, setting up new wifi network*");
+    info_logger("[wifi] Waiting for SmartConfig...");
     WiFi.disconnect();
     WiFi.beginSmartConfig();
 
@@ -1188,8 +1236,8 @@ void wifiloop() //[ok]
       digitalWrite(NETWORK_LED, network_led_state);
       delay(500); //wait for smart config to arrive.
     }
-    info_logger("SmartConfig received!");
-    info_logger("Testing new WiFi credentials...");
+    info_logger("[wifi] SmartConfig received!");
+    info_logger("[wifi] Testing new WiFi credentials...");
 
     // test wifi credentials received.
     while (WiFi.status() != WL_CONNECTED)
@@ -1199,9 +1247,11 @@ void wifiloop() //[ok]
       delay(500);
     }
 
-    info_logger("-> Connected to new WiFi network! smart config finished..");
+    info_logger("[wifi] Connected to new WiFi network! smart config finished..");
     // save wifi credential in filesystem.
     save_wifi_data_in_fs();
+    info_logger("[esp] rebooting device. bye");
+    ESP.restart(); // restart esp.
   }
   
   // WiFi connected
@@ -1212,33 +1262,33 @@ void wifiloop() //[ok]
     if ((!mqtt_client.connected()) && (millis() - lastMqttReconnect >= mqttReconnectInterval))
     {
       // connecting to a mqtt broker
-      info_logger("* MQTT broker connection attempt..");
+      info_logger("[mqtt] MQTT broker connection attempt..");
       lastMqttReconnect = millis();
       String client_id = "esp32-mqtt_client-";
       client_id += String(WiFi.macAddress());
-      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "mqtt client id: %s", client_id.c_str());
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[mqtt] client id: %s", client_id.c_str());
       digitalWrite(NETWORK_LED, HIGH); //led pulse begin...
       // Try mqtt connection to the broker.
       if (mqtt_client.connect(client_id.c_str(), mqtt_username, mqtt_password, willTopic, willQoS, willRetain, willMessage))
       {
-        info_logger("+ Connected to MQTT broker!");
+        info_logger("[mqtt] Connected to MQTT broker!");
         // Publish and subscribe
-        info_logger("- Subscribing to mqtt topics:");
+        info_logger("[mqtt] Subscribing to mqtt topics:");
         mqtt_client.subscribe(topic);
-        info_logger("# Topic 1 ok");
+        info_logger("[mqtt] Topic 1 ok");
         delay(1000);
         mqtt_client.subscribe(topic_2);
-        info_logger("# Topic 2 ok");
+        info_logger("[mqtt] Topic 2 ok");
         delay(1000);
         mqtt_client.subscribe(topic_3);
-        info_logger("# Topic 3 ok");
+        info_logger("[mqtt] Topic 3 ok");
         lastSaluteTime = millis();
-        Salute = false; // flag to send connection message
-        info_logger("** MQTT connection done. **");
+        Salute = false; // flag to send connection message.
+        info_logger("[mqtt] MQTT connection done. **");
       }
       else
       {
-        ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "-- Fail MQTT Connection with state: %d", mqtt_client.state());
+        ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[mqtt] Fail MQTT Connection with state: %d", mqtt_client.state());
         digitalWrite(NETWORK_LED, LOW); // led pulse end...
         return;
       }
@@ -1248,7 +1298,7 @@ void wifiloop() //[ok]
     {
       mqtt_client.publish("device/hello", "connected");
       Salute = true;
-      info_logger("** MQTT \"Salute\" message sent");
+      info_logger("[mqtt] 'Salute' message sent");
     }
     return;
   }
@@ -1264,17 +1314,6 @@ void wifiloop() //[ok]
       network_led_state = (network_led_state == LOW) ? HIGH : LOW;
       digitalWrite(NETWORK_LED, network_led_state);
     }
-
-    // if (currentTime - lastWifiReconnect >= wifiReconnectInterval)
-    // {
-    //   lastWifiReconnect = currentTime;
-    //   Serial.println("Device disconnected from WiFi network..");
-    //   Serial.print("WiFi connection status: ");
-    //   Serial.println(WiFi.status());
-    //   Serial.println("Trying to reconnect to SSID: ");
-    //   Serial.println(WiFi.SSID());
-    //   WiFi.disconnect();
-    // }
     return;
   }
 }
@@ -1517,9 +1556,10 @@ void setup()
   // WifiSettings
   info_logger("WiFi settings and config.");
   WiFi.onEvent(WiFiEvent);
-  WiFi.disconnect();  //
+  WiFi.disconnect();
   delay(1000);            // 1 second delay
   WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP(AP_SSID.c_str(), AP_PASS.c_str(), 1, 1); //channel 1, hidden ssid
   WiFi.begin(esid.c_str(), epass.c_str());
   info_logger("WiFi settings ok.");
   //---------------------------------------- esp_now settings
@@ -1532,7 +1572,7 @@ void setup()
   esp_now_register_send_cb(OnDataSent);
   esp_now_register_recv_cb(OnDataRecv);
   info_logger("ESP_NOW Setup Complete!");
-  //---------------------------------------- mqtt settings ---
+  //---------------------------------------- mqtt settings
   info_logger("Setting up MQTT");
   mqtt_client.setBufferSize(mqttBufferSize);
   mqtt_client.setServer(mqtt_broker, mqtt_port);
