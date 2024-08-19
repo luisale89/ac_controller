@@ -19,38 +19,30 @@ static const char* TAG = "main";
 #include <DallasTemperature.h>
 #include <FS.h>
 #include <SPIFFS.h>
+#include <secrets.h>
 
 // LastWill MQTT
-const char willTopic[] = "device/lastwill";
-int willQoS = 0;
-bool willRetain = false;
-const char willMessage[] = "disconnected";
+const char willTopic[20] = "device/lastwill";
+const int willQoS = 0;
+const bool willRetain = false;
+const char willMessage[20] = "disconnected";
 uint16_t mqttBufferSize = 512; // LuisLucena, bufferSize in bytes
 
 // Variables
-const int Pin_compresor = 25; // Y
-const int Pin_vent = 26;      // G
 int network_led_state = LOW;
 
-// Variables Sensor temperatura
-const int oneWirePipe = 18;
-const int oneWireAmb = 19; // se cambia pin del sensor de temp. ambiente, para evitar errores al subir el código.
-
-// definitions
-// #define BROKER_LED 32
-#define NETWORK_LED 32
-#define REMOTE_BUTTON 17
-#define REMOTE_COMP_LED 16
-#define REMOTE_STATE_LED 27
-#define PIN_SENMOV 34 // se cambia pin del sensor de movimiento.
-#define AP_BUTTON 14
+// pinout
+#define NETWORK_LED 2
+#define RADAR 26
+#define AP_BTN 19
+#define MANUAL_BTN 34
+#define NOW_BTN 18
+#define AMB_TEMP 32
 
 // Setup a oneWire instance to communicate with any OneWire devices
-OneWire oneWire(oneWirePipe);
-OneWire oneWireAmbTemp(oneWireAmb);
+OneWire oneWireAmbTemp(AMB_TEMP);
 
 // Pass our oneWire reference to Dallas Temperature sensor
-DallasTemperature vapor_temp_sensor(&oneWire);
 DallasTemperature ambient_temp_sensor(&oneWireAmbTemp);
 
 // Time Variables
@@ -79,7 +71,7 @@ const char *topic = "system/operation/settings";
 const char *topic_2 = "system/operation/state";
 const char *topic_3 = "system/operation/setpoint";
 const char *mqtt_username = "Token";
-const char *mqtt_password = "ebc8915c-9510-480b-a7fc-b057586bdf39";
+const char *mqtt_password = MQTT_PASSWORD;
 const int mqtt_port = 1883;
 bool Envio = false;
 
@@ -87,17 +79,17 @@ bool Envio = false;
 TaskHandle_t Task1;
 
 // WIFI VARIABLES
-String esid = "";
-String epass = "";
-String AP_SSID = "AC-HUB";
-String AP_PASS = "random-password-here";
+char* esid = "";
+char* epass = "";
+const char* AP_SSID = "AC-HUB";
+const char* AP_PASS = AP_PASSWORD;
 WiFiClient espClient;
 PubSubClient mqtt_client(espClient);
 int wifi_reconnect_attempt = 0;
-const int MAX_RECONNECT_ATTEMPTS = 33; // three times on every channel.
+const int MAX_RECONNECT_ATTEMPTS = 22; // two times on every channel.
 
 // RTC
-RTC_DS1307 DS1307_RTC;
+RTC_DS3231 DS3231_RTC;
 char Week_days[7][12] = {"Domingo", "Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado"};
 
 // Variables de configuracion
@@ -114,7 +106,6 @@ float CurrentSysTemp;
 bool Salute = false;
 bool MovingSensor = false;
 bool schedule_enabled; // Variables de activacion del modo sleep
-double vapor_temp = 22;
 double ambient_temp = 22;
 
 // NTP
@@ -147,7 +138,7 @@ typedef struct controller_data_struct {
   uint8_t sender_id;            // (1 byte)
   uint8_t active_system_mode;   // (1 byte)
   uint8_t fault_code;           // (1 byte) 0-no_fault; 1..255 controller_fault_codes.
-  float evap_vapor_line_temp;   // (4 bytes)
+  float evap_satura_temp;       // (4 bytes)
   float evap_air_in_temp;       // (4 bytes)
   float evap_air_out_temp;      // (4 bytes)
 } controller_data_struct;       // TOTAL = 21 bytes
@@ -268,7 +259,7 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len)
       // create a JSON document with received data and send it by event to the web page
       root["system_mode"] = controller_data.active_system_mode;
       root["fault_code"] = controller_data.fault_code;
-      root["evap_vapor_line_temp"] = controller_data.evap_vapor_line_temp;
+      root["evap_vapor_line_temp"] = controller_data.evap_satura_temp;
       root["evap_air_in_temp"] = controller_data.evap_air_in_temp;
       root["evap_air_out_temp"] = controller_data.evap_air_out_temp;
       serializeJson(root, payload);
@@ -319,14 +310,14 @@ void set_AP_for_ESPNOW_offline_mode() {
   WiFi.disconnect();
   ESP_LOGI(TAG, "[wifi] channel: %d", WiFi.channel());
   WiFi_channel = WiFi.channel();
-  WiFi.softAP(AP_SSID.c_str(), AP_PASS.c_str(), WiFi_channel, 1); //channel, hidden ssid
+  WiFi.softAP(AP_SSID, AP_PASS, WiFi_channel, 1); //channel, hidden ssid
   espnow_connection_state = ESPNOW_OFFLINE;
   return;
 }
 
 void test_AP_for_ESPNOW_online_mode(){
   info_logger("[wifi] Setting up to communicate over esp_now while device is online.");
-  WiFi.begin(esid.c_str(), epass.c_str());
+  WiFi.begin(esid, epass);
   wifi_reconnect_attempt = 0;
 }
 
@@ -421,7 +412,7 @@ void update_rtc_from_ntp()
     int minuto = timeinfo.tm_min;
     int segundo = timeinfo.tm_sec;
 
-    DS1307_RTC.adjust(DateTime(ano, mes, dia, hora, minuto, segundo));
+    DS3231_RTC.adjust(DateTime(ano, mes, dia, hora, minuto, segundo));
     info_logger("[RTC] DateTime updated!");
     ESP_LOGI(TAG, "[RTC] Day: %s - %s:%s", String(dia).c_str(), String(hora).c_str(), String(minuto).c_str());
   }
@@ -927,7 +918,7 @@ void system_state_controller() //[OK]
     return;
   }
 
-  DateTime now = DS1307_RTC.now();
+  DateTime now = DS3231_RTC.now();
   String Day = Week_days[now.dayOfTheWeek()];
 
   if (!SPIFFS.begin(true))
@@ -1032,19 +1023,6 @@ void system_state_controller() //[OK]
 }
 
 // Lee temperatura
-double read_vapor_temp_from_sensor() //[ok]
-{
-  vapor_temp_sensor.requestTemperatures();
-  float temperatureC = vapor_temp_sensor.getTempCByIndex(0);
-  ESP_LOGI(TAG, "Vapor temperature: %3.2f °C", temperatureC);
-  if (temperatureC == 85 || temperatureC == -127)
-  {
-    error_logger("Error reading OneWire sensor - [Vapor temperature]");
-    return vapor_temp; // return las valid value from vapor_temp variable..
-  }
-  return temperatureC;
-}
-
 double read_amb_temp_from_sensor() //[ok]
 {
   ambient_temp_sensor.requestTemperatures();
@@ -1056,94 +1034,6 @@ double read_amb_temp_from_sensor() //[ok]
     return ambient_temp; // return las valid value from ambient_temp variable..
   }
   return temperatureAmbC;
-}
-
-// Enciende o apaga las salidas a relé
-void update_relay_outputs() //[ok]
-{
-  bool YState = false;
-  bool GState = false;
-  bool Y = false; // off by default
-  bool G = false; // off by default
-
-  // Validacion si hay algun cambio de estado en los pines
-  if (digitalRead(Pin_vent) == 1)
-  {
-    GState = true; // update GState
-  }
-
-  if (digitalRead(Pin_compresor) == 1)
-  {
-    YState = true; // update YState
-  }
-  // SysState == "off || sleep" will get Y and G to false, as default
-  if (SysState == "on")
-  {
-    if (SysFunc == "fan")
-    {
-      // fan only mode
-      Y = false;
-      G = true;
-    }
-    else if (SysFunc == "cooling")
-    {
-      // cooling mode
-      Y = true;
-      G = true;
-    }
-    else if (SysFunc == "idle")
-    {
-      // idle mode
-      Y = false;
-      G = false;
-    }
-  }
-  // Si no hubo cambio en las salidas..
-  if (Y == YState && G == GState)
-  {
-    return;
-  }
-
-  // Si el cambio es para apagar el sistema,
-  if (!Y && !G)
-  {
-    info_logger("Relays update: Turning off the fan and compressor..");
-    digitalWrite(Pin_compresor, Y);
-    digitalWrite(REMOTE_COMP_LED, Y);
-    delay(250); // delay between relays
-    digitalWrite(Pin_vent, G);
-    lastCompressorTurnOff = millis(); // update lastCompressorTurnOff value
-    Envio = true;
-    return;
-  }
-  // si el cambio es para que el sistema enfríe..
-  if (Y && G)
-  {
-    digitalWrite(Pin_vent, G); // Enciende el ventilador..
-    if (millis() - lastCompressorTurnOff > CompressorTimeOut)
-    {
-      info_logger("Relays Update: Turning on the compressor and the fan.. Cooling mode..");
-      delay(250);                     // delay between relays
-      digitalWrite(Pin_compresor, Y); // aquí se produce el cambio  del YState, y para el próximo loop no entra en esta parte del código..
-      digitalWrite(REMOTE_COMP_LED, Y);
-    }
-    else
-    {
-      return; // prevent set Envio to true...
-    }
-  }
-  // Si el cambio es para que el sistema no enfríe, pero funcione la turbina del evaporador..
-  else if (!Y && G)
-  {
-    info_logger("Relays Update: Fan only, compressor turned off..");
-    digitalWrite(Pin_vent, G);
-    digitalWrite(Pin_compresor, Y);
-    digitalWrite(REMOTE_COMP_LED, Y);
-    lastCompressorTurnOff = millis(); // update LastCompressorTurnOff value
-  }
-
-  Envio = true; // send message to the broker on any state change.
-  return;
 }
 
 // carga los datos de la red wifi desde el spiffs.
@@ -1176,11 +1066,9 @@ void load_wifi_data_from_fs()
     return;
   }
 
-  String ESID = doc1["ssid"];
-  String PW = doc1["pass"];
-  
-  esid = ESID;
-  epass = PW;
+  esid = doc1["ssid"];
+  epass = doc1["pass"];
+
   f.close();
   return;
 }
@@ -1220,7 +1108,7 @@ void save_wifi_data_in_fs()
 void wifiloop() //[ok]
 {
   // only wait for SmartConfig when the AP button is pressed.
-  if ((digitalRead(AP_BUTTON) == 0))
+  if ((digitalRead(AP_BTN) == 0))
   {
     info_logger("[wifi] the AP button has been pressed, setting up new wifi network*");
     info_logger("[wifi] Waiting for SmartConfig...");
@@ -1320,9 +1208,9 @@ void read_manual_button_state() //[ok]
 {
   // Apaga o enciende el aire depediendo del estado
 
-  if (digitalRead(REMOTE_BUTTON) == 0 && millis() - lastButtonPress > buttonTimeOut)
+  if (digitalRead(MANUAL_BTN) == 0 && millis() - lastButtonPress > buttonTimeOut)
   {
-    info_logger("* Remote Button has been pressed..");
+    info_logger("* Manual Button has been pressed..");
     if (SysState == "on")
     {
       info_logger("- Turning off the system.");
@@ -1336,19 +1224,6 @@ void read_manual_button_state() //[ok]
       SysState = "on";
       save_operation_state_in_fs();
       Envio = true;
-    }
-    else if (SysState == "sleep")
-    {
-      // on Sleep State, the user can't change the System State with the local button..
-      // block State change and notify to the user with blinking led.
-      info_logger("System is in Sleep mode, remote button has no effect.");
-      for (int i = 0; i <= 2; i++) // three times
-      {
-        digitalWrite(REMOTE_STATE_LED, HIGH);
-        delay(125);
-        digitalWrite(REMOTE_STATE_LED, LOW);
-        delay(125);
-      }
     }
     lastButtonPress = millis();
   }
@@ -1385,20 +1260,6 @@ void send_data_to_broker() //[ok]
 
   double tdecimal = (int)(ambient_temp * 100 + 0.5) / 100.0;
 
-  // TAGO.IO SEND DATA
-  bool Y = false;
-  bool G = false;
-  // update Y and G with the output pins
-  if (digitalRead(Pin_vent) == 1)
-  {
-    G = true;
-  }
-
-  if (digitalRead(Pin_compresor) == 1)
-  {
-    Y = true;
-  }
-
   String timectrl;
   timectrl = schedule_enabled ? "on": "off";
   // json todas las variables, falta recoleccion
@@ -1411,12 +1272,9 @@ void send_data_to_broker() //[ok]
   JsonObject metadata = doc.createNestedObject("metadata");
   metadata["user_setpoint"] = SelectTemp;
   metadata["active_setpoint"] = CurrentSysTemp;
-  metadata["re_temp"] = vapor_temp;
-  metadata["G"] = G;
-  metadata["Y"] = Y;
   metadata["sys_state"] = SysState;
   metadata["sys_mode"] = SysMode;
-  metadata["presence"] = digitalRead(PIN_SENMOV);
+  metadata["presence"] = digitalRead(RADAR);
   metadata["timectrl"] = timectrl;
 
   serializeJson(doc, output);
@@ -1450,13 +1308,12 @@ void sensors_read(void *pvParameters)
   for (;;)
   { 
     // Lectura de sensor de movimiento va aqui
-    MovingSensor = digitalRead(PIN_SENMOV) ? true : false;
+    MovingSensor = digitalRead(RADAR) ? true : false;
 
     if (millis() - lastControllerTime > controllerInterval)
     {
       info_logger("* Updating sensor readings and exec.controllers");
       lastControllerTime = millis();
-      vapor_temp = read_vapor_temp_from_sensor();
       ambient_temp = read_amb_temp_from_sensor();
       double tdecimal = (int)(ambient_temp * 100 + 0.5) / 100.0;
 
@@ -1481,12 +1338,6 @@ void sensors_read(void *pvParameters)
       Envio = true;
     }
 
-    // remote board led feedback...
-    digitalWrite(REMOTE_STATE_LED, SysState == "on");
-
-    // update outputs.
-    update_relay_outputs();
-
     //send data to the mqtt broker
     send_data_to_broker();
 
@@ -1503,13 +1354,9 @@ void setup()
   // pins definition
   // pinMode(BROKER_LED, OUTPUT);          // broker connection led.
   pinMode(NETWORK_LED, OUTPUT);         // network connection led.
-  pinMode(REMOTE_BUTTON, INPUT_PULLUP); // remote board button.
-  pinMode(REMOTE_COMP_LED, OUTPUT);     // remote comp led.
-  pinMode(REMOTE_STATE_LED, OUTPUT);    // remote state feedback led.
-  pinMode(PIN_SENMOV, INPUT_PULLDOWN);  // sensor de presencia
-  pinMode(AP_BUTTON, INPUT);            // Wifi Restart and configuration.
-  pinMode(Pin_compresor, OUTPUT);       // Compresor
-  pinMode(Pin_vent, OUTPUT);            // Ventilador
+  pinMode(MANUAL_BTN, INPUT); // remote board button.
+  pinMode(RADAR, INPUT);  // sensor de presencia
+  pinMode(AP_BTN, INPUT);            // Wifi Restart and configuration.
 
 #ifndef ESP32
   while (!Serial)
@@ -1517,24 +1364,22 @@ void setup()
 #endif
 
   info_logger("Setting up RTC on I2C bus.");
-  if (!DS1307_RTC.begin())
+  if (!DS3231_RTC.begin())
   {
     error_logger("Couldn't find RTC, please reboot.");
     while (1)
       ;
   }
-  if (!DS1307_RTC.isrunning())
+  if (DS3231_RTC.lostPower())
   {
-    info_logger("RTC is NOT running yet!, setting up on sketch compiled datetime.");
+    info_logger("RTC is NOT running!, setting up on sketch compiled datetime.");
     // following line sets the RTC to the date & time this sketch was compiled
-    DS1307_RTC.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    DS3231_RTC.adjust(DateTime(F(__DATE__), F(__TIME__)));
   }
   info_logger("RTC ok.");
 
   // Inicio Sensores OneWire
   info_logger("OneWire sensors inisialization!");
-  vapor_temp_sensor.begin();
-  delay(1000);
   ambient_temp_sensor.begin();
   delay(1000);
   info_logger("OneWire sensors ok.");
@@ -1556,8 +1401,8 @@ void setup()
   WiFi.disconnect();
   delay(1000);            // 1 second delay
   WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP(AP_SSID.c_str(), AP_PASS.c_str(), 1, 1); //channel 1, hidden ssid
-  WiFi.begin(esid.c_str(), epass.c_str());
+  WiFi.softAP(AP_SSID, AP_PASS, 1, 1); //channel 1, hidden ssid
+  WiFi.begin(esid, epass);
   info_logger("WiFi settings ok.");
   //---------------------------------------- esp_now settings
   info_logger("Setting up ESP_NOW");
