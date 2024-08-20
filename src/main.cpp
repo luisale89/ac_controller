@@ -93,10 +93,13 @@ RTC_DS3231 DS3231_RTC;
 char Week_days[7][12] = {"Domingo", "Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado"};
 
 // Variables de configuracion
-String SysState;               // on, off, sleep
-String PrevSysState = "undef"; // on, off, sleep
-String SysMode;                // auto, fan, cool
-String SysFunc = "fan";        // cooling, fan
+enum SysModeEnum {AUTO, FAN, COOL};
+enum SysStateEnum {ON_STATE, OFF_STATE, SLEEP};
+SysStateEnum SysState = OFF_STATE;
+SysStateEnum PrevSysState = OFF_STATE;
+SysModeEnum SysMode = AUTO;
+
+//--
 String on_condition;
 String off_condition;
 String Sleep = "undef"; // first value for Sleep variable
@@ -175,11 +178,11 @@ outgoing_settings_struct outgoing_settings_data;
 
 //logger functions
 void info_logger(const char *message) {
-  ESP_LOGI(TAG, "%s", message);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "%s", message);
 }
 
 void error_logger(const char *message) {
-  ESP_LOGE(TAG, "%s", message);
+  ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "%s", message);
 }
 
 //esp-now functions.
@@ -194,7 +197,7 @@ String printMAC(const uint8_t * mac_addr) {
 
 // add peer to peer list.
 bool addPeer(const uint8_t *peer_addr) {      // add pairing
-  ESP_LOGI(TAG, "[esp-now] adding new peer to peer list");
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] adding new peer to peer list");
   memset(&slave, 0, sizeof(slave));
   const esp_now_peer_info_t *peer = &slave;
   memcpy(slave.peer_addr, peer_addr, 6);
@@ -221,7 +224,7 @@ bool addPeer(const uint8_t *peer_addr) {      // add pairing
   }
   else
   {
-    ESP_LOGE(TAG, "[esp-now] Error: %d, while adding new peer.", addStatus);
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[esp-now] Error: %d, while adding new peer.", addStatus);
     return false;
   }
 }
@@ -229,7 +232,7 @@ bool addPeer(const uint8_t *peer_addr) {      // add pairing
 // callback when data is sent
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
   String printable_mac_address = printMAC(mac_addr);
-  ESP_LOGI(TAG, "[esp-now] packet sent to: %s", printable_mac_address.c_str());
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] packet sent to: %s", printable_mac_address.c_str());
   if (status == ESP_NOW_SEND_SUCCESS) {
     info_logger("[esp-now] delivery success.");
   } else {
@@ -240,7 +243,7 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 
 void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len) { 
   String printable_mac_address = printMAC(mac_addr);
-  ESP_LOGI(TAG, "[esp-now] %d bytes of data received from: %s", len, printable_mac_address.c_str());
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] %d bytes of data received from: %s", len, printable_mac_address.c_str());
   if (espnow_connection_state == ESPNOW_IDLE) {
     info_logger("[esp-now] Waiting to finish AP connection. Ignoring Data..");
     return;
@@ -308,7 +311,7 @@ void set_AP_for_ESPNOW_offline_mode() {
   // this function allows offline esp-now communication, in case of getting disconnected from the WiFi network.
   info_logger("[wifi] Setting up to communicate over esp_now while device is offline.");
   WiFi.disconnect();
-  ESP_LOGI(TAG, "[wifi] channel: %d", WiFi.channel());
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] channel: %d", WiFi.channel());
   WiFi_channel = WiFi.channel();
   WiFi.softAP(AP_SSID, AP_PASS, WiFi_channel, 1); //channel, hidden ssid
   espnow_connection_state = ESPNOW_OFFLINE;
@@ -323,7 +326,7 @@ void test_AP_for_ESPNOW_online_mode(){
 
 
 void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
-  ESP_LOGI(TAG, "[wifi] event code: %d", event);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] event code: %d", event);
   switch (event) {
     case ARDUINO_EVENT_WIFI_READY:               info_logger("[wifi] interface ready"); break;
     case ARDUINO_EVENT_WIFI_SCAN_DONE:           info_logger("[wifi] Completed scan for access points"); break;
@@ -333,10 +336,10 @@ void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
       WiFi_channel = WiFi.channel();
       espnow_connection_state = ESPNOW_ONLINE;
       wifi_reconnect_attempt = 0;
-      ESP_LOGI(TAG, "[wifi] Connected to the AP on channel: %d", WiFi_channel);
-      ESP_LOGI(TAG, "[wifi] RSSI: %d", WiFi.RSSI());
-      ESP_LOGI(TAG, "[wifi] SOFT AP MAC Address: %s", WiFi.softAPmacAddress().c_str());
-      ESP_LOGI(TAG, "[wifi] STA MAC Address: %s", WiFi.macAddress().c_str());
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] Connected to the AP on channel: %d", WiFi_channel);
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] RSSI: %d", WiFi.RSSI());
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] SOFT AP MAC Address: %s", WiFi.softAPmacAddress().c_str());
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] STA MAC Address: %s", WiFi.macAddress().c_str());
       break;
 
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
@@ -348,15 +351,15 @@ void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
       }
       wifi_reconnect_attempt ++;
       info_logger("[wifi] Disconnected from WiFi Access Point"); 
-      ESP_LOGI(TAG, "[wifi] lost connection. Reason code: %d", info.wifi_sta_disconnected.reason);
-      ESP_LOGI(TAG, "[wifi] Reconnect attempt # %d..", wifi_reconnect_attempt);
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] lost connection. Reason code: %d", info.wifi_sta_disconnected.reason);
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] Reconnect attempt # %d..", wifi_reconnect_attempt);
       espnow_connection_state = ESPNOW_IDLE;
       WiFi.reconnect();
       break;
 
     case ARDUINO_EVENT_WIFI_STA_AUTHMODE_CHANGE: info_logger("[wifi] Authentication mode of access point has changed"); break;
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-      ESP_LOGI(TAG, "[wifi] IP Address assigned: %s", WiFi.localIP().toString());
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] IP Address assigned: %s", WiFi.localIP().toString());
       break;
 
     case ARDUINO_EVENT_WIFI_STA_LOST_IP:        info_logger("[wifi] Lost IP address and IP address is reset to 0"); break;
@@ -377,7 +380,7 @@ void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 }
 
 // Guarda el estado del sistema en spiffs
-void save_operation_state_in_fs() //[OK]
+void save_operation_state_in_fs() //[OK] [OK]
 {
   info_logger("[spiffs] saving operation state in file system.");
   if (!SPIFFS.begin(true))
@@ -394,13 +397,16 @@ void save_operation_state_in_fs() //[OK]
     delay(200);
     return;
   }
-  String SEncendido = SysState;
-  f.print(SEncendido);
+  char* buffer_state = "off";
+  if (SysState == ON_STATE){buffer_state = "on";}
+  else if (SysState == SLEEP){buffer_state = "sleep";}
+  
+  f.print(buffer_state);
   f.close();
 }
 
 // update rtc with time from ntp server {
-void update_rtc_from_ntp()
+void update_rtc_from_ntp() // [OK] [OK]
 {
   struct tm timeinfo;
   if (getLocalTime(&timeinfo))
@@ -414,7 +420,7 @@ void update_rtc_from_ntp()
 
     DS3231_RTC.adjust(DateTime(ano, mes, dia, hora, minuto, segundo));
     info_logger("[RTC] DateTime updated!");
-    ESP_LOGI(TAG, "[RTC] Day: %s - %s:%s", String(dia).c_str(), String(hora).c_str(), String(minuto).c_str());
+    ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[RTC] Day: %s - %s:%s", String(dia).c_str(), String(hora).c_str(), String(minuto).c_str());
   }
   else
   {
@@ -422,7 +428,7 @@ void update_rtc_from_ntp()
   }
 }
 
-void timeavailable(struct timeval *tml)
+void timeavailable(struct timeval *tml) // [OK] [OK] 
 {
   // this should be called every hour automatically..
   info_logger("[RTC] Got time adjustment from NTP! latest datetime is now available");
@@ -440,7 +446,7 @@ void save_timectrl_settings_in_fs(bool value, String onCondition, String offCond
   doc["off_condition"] = offCondition;
 
   serializeJson(doc, timectrl_setting);
-  ESP_LOGI(TAG, "data to save in filesystem: %s", timectrl_setting.c_str());
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "data to save in filesystem: %s", timectrl_setting.c_str());
 
   if (!SPIFFS.begin(true))
   {
@@ -478,14 +484,14 @@ void load_timectrl_settings_from_fs() //[OK]
     return;
   }
   String Settings = f.readString();
-  ESP_LOGI(TAG, "data loaded from file: %s", Settings.c_str());
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "data loaded from file: %s", Settings.c_str());
   // String input;
   StaticJsonDocument<128> doc1;
   DeserializationError error = deserializeJson(doc1, Settings);
 
   if (error)
   {
-    ESP_LOGE(TAG, "JSON Deserialization error raised with code: %s", error.c_str());
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
     return;
   }
 
@@ -508,7 +514,7 @@ void save_schedule_in_fs(int HON, int HOFF, String Day, bool enable) //[OK]
   doc["enable"] = enable;
 
   serializeJson(doc, Hours);
-  ESP_LOGI(TAG, "%s schedule to save in fs: %s", Day.c_str(), Hours.c_str());
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "%s schedule to save in fs: %s", Day.c_str(), Hours.c_str());
 
   if (!SPIFFS.begin(true))
   {
@@ -537,7 +543,7 @@ void save_auto_config_in_fs(int wait, int temp)
   doc["temp"] = temp;
 
   serializeJson(doc, output);
-  ESP_LOGI(TAG, "data to save in fs: %s", output.c_str());
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "data to save in fs: %s", output.c_str());
 
   if (!SPIFFS.begin(true))
   {
@@ -577,38 +583,40 @@ void save_operation_mode_in_fs(String Modo) //[OK]
     delay(200);
     return;
   }
-  f.print(Modo);
+  char* mode_buffer = "auto";
+  if (SysMode == FAN) {mode_buffer = "fan";}
+  else if (SysMode == COOL) {mode_buffer = "cool";}
+
+  f.print(mode_buffer);
   f.close();
-  SysMode = Modo;
 }
 
 // Lee la variable de encendio o apadado de tago
-void process_op_state_from_broker(String json) //[NEW, OK]
+void process_op_state_from_broker(String json) //[OK, OK]
 {
   // String input;
   StaticJsonDocument<96> doc;
   DeserializationError error = deserializeJson(doc, json);
   if (error)
   {
-    ESP_LOGE(TAG, "JSON Deserialization error raised with code: %s", error.c_str());
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
     return;
   }
   String variable = doc["variable"]; // "system_state"
   String value = doc["value"];       // "on"
-
-  if (value == "off" || value == "on")
-  {
-    SysState = value;
-  }
-  else
-  {
+  
+  if (value == "on") {SysState = ON_STATE;}
+  else if (value == "off") {SysState == OFF_STATE;}
+  else {
     error_logger("Error: invalid value received from broker on -system_state-");
+    return;
   }
   save_operation_state_in_fs();
+  return;
 }
 
 // Establece el encendido o apagado al inicio
-void load_operation_state_from_fs() //[OK]
+void load_operation_state_from_fs() //[OK] [OK]
 {
   info_logger("[spiffs] loading operation state from fs");
   if (!SPIFFS.begin(true))
@@ -628,15 +636,11 @@ void load_operation_state_from_fs() //[OK]
   String ESave = file.readString();
   file.close();
 
-  if (ESave == "on" || ESave == "off" || ESave == "sleep")
-  {
-    SysState = ESave;
-    ESP_LOGI(TAG, "system state loaded from fs: %s", ESave.c_str());
-  }
-  else
-  {
-    error_logger("Error: Bad value stored in Encendido.txt");
-  }
+  if (ESave == "on") {SysState = ON_STATE;}
+  else if (ESave == "off") {SysState = OFF_STATE;}
+  else if (ESave == "sleep") {SysState = SLEEP;}
+  else {error_logger("Error: Bad value stored in Encendido.txt");}
+
   return;
 }
 
@@ -663,7 +667,7 @@ void load_temp_setpoint_from_fs()
   SelectTemp = ReadTemp.toFloat();
   file.close();
   CurrentSysTemp = SelectTemp;
-  ESP_LOGI(TAG, "NORMAL Temp. loaded: %3.2f °C", CurrentSysTemp);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "NORMAL Temp. loaded: %3.2f °C", CurrentSysTemp);
 
   // Temperatura en Auto
   info_logger("loading AUTO setpoints from fs");
@@ -686,7 +690,7 @@ void load_temp_setpoint_from_fs()
 
   if (error)
   {
-    ESP_LOGE(TAG, "JSON Deserialization error raised with code: %s", error.c_str());
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
     return;
   }
 
@@ -694,7 +698,7 @@ void load_temp_setpoint_from_fs()
   AutoTimeOut = (unsigned long)wait * 60000L;
   AutoTemp = doc["temp"]; // 24
 
-  ESP_LOGI(TAG, "Auto setpoints loaded = wait: %d min., temp: %3.2f °C", wait, AutoTemp);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Auto setpoints loaded = wait: %d min., temp: %3.2f °C", wait, AutoTemp);
   f.close();
 }
 
@@ -718,9 +722,11 @@ void load_operation_mode_from_fs() //[OK]
     return;
   }
   String ReadModo = file.readString();
+  if (ReadModo == "auto") {SysMode == AUTO;}
+  else if (ReadModo == "fan") {SysMode == FAN;}
+  else if (ReadModo == "cool") {SysMode == COOL;}
 
-  SysMode = ReadModo;
-  ESP_LOGI(TAG, "operation mode loaded: %s", SysMode);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "operation mode loaded: %s Enum %s", ReadModo, SysMode);
 
   file.close();
 }
@@ -733,7 +739,7 @@ void process_settings_from_broker(String json) //[OK]
 
   if (error)
   {
-    ESP_LOGE(TAG, "JSON Deserialization error raised with code: %s", error.c_str());
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
     return;
   }
 
@@ -790,13 +796,13 @@ void process_temp_sp_from_broker(String json) //[OK]
 
   if (error)
   {
-    ESP_LOGE(TAG, "JSON Deserialization error raised with code: %s", error.c_str());
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
     return;
   }
 
   String variable = doc["variable"]; // "user_setpoint"
   int value = doc["value"];          // 24
-  ESP_LOGI(TAG, "Temp. sp received: %d °C", value);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Temp. sp received: %d °C", value);
 
   if (!SPIFFS.begin(true))
   {
@@ -824,13 +830,13 @@ void mqtt_message_callback(char *topicp, byte *payload, unsigned int length) //[
   String Mensaje;
   //begin.
   digitalWrite(NETWORK_LED, LOW);
-  ESP_LOGI(TAG, "$ MQTT Message arrived on topic: %s", topic.c_str());
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "$ MQTT Message arrived on topic: %s", topic.c_str());
   for (int i = 0; i < length; i++)
   {
     Mensaje = Mensaje + (char)payload[i];
   }
   //print message in logger.
-  ESP_LOGI(TAG, "+ Message: %s", Mensaje.c_str());
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "+ Message: %s", Mensaje.c_str());
 
   // Selecciona la funcion acorde al topico al cual llego el mensaje
   if (topic == "system/operation/settings")
@@ -862,46 +868,29 @@ void mqtt_message_callback(char *topicp, byte *payload, unsigned int length) //[
 }
 
 // Funcion que regula la temperatura
-void temp_controller(float temp) // [OK]
+void temp_setpoint_controller(float temp) // [OK]
 {
   // [bug] system does not responds on setpoint change when auto mode is set.
   //  SelectTemp by default.
-  CurrentSysTemp = SelectTemp; // Use SelectTemp as default.
 
-  if (SysMode == "fan")
+  switch (SysMode)
   {
-    SysFunc = "fan";
-    return;
-  }
-  // condition to modify CurrentSysTemp.
-  if (SysMode == "auto")
-  {
-    if (MovingSensor)
-    {
+  case AUTO:
+    if (MovingSensor) {
       MovingSensorTime = millis();
+      CurrentSysTemp = SelectTemp;
     }
-    else if (millis() - MovingSensorTime > AutoTimeOut)
-    {
-      // modify CurrentSysTemp to AutoTemp when AutoTimeOut is reached.
-      CurrentSysTemp = AutoTemp;
+    else if (millis() - MovingSensorTime > AutoTimeOut) {
+      CurrentSysTemp == AutoTemp;
     }
-  }
+    break;
 
-  // control de las salidas en func. de la temperatura
-  if (temp < CurrentSysTemp - 0.5)
-  {
-    if (CurrentSysTemp == AutoTemp)
-    {
-      SysFunc = "idle";
-    }
-    else
-    {
-      SysFunc = "fan";
-    }
-  }
-  else if (temp > CurrentSysTemp + 0.5)
-  {
-    SysFunc = "cooling";
+  case COOL:
+    CurrentSysTemp = SelectTemp;
+    break;
+
+  default:
+    CurrentSysTemp = SelectTemp;
   }
 
   return;
@@ -939,19 +928,18 @@ void system_state_controller() //[OK]
   file.close();
 
   StaticJsonDocument<64> doc;
-
   DeserializationError error = deserializeJson(doc, AutoOff);
 
   if (error)
   {
-    ESP_LOGE(TAG, "JSON Deserialization error raised with code: %s", error.c_str());
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
     return;
   }
 
   int ON = doc["ON"];   // "0730"
   int OFF = doc["OFF"]; // "2130"
-
   bool enable = doc["enable"];
+  
   if (!enable)
   {
     Sleep = "off";
@@ -972,9 +960,9 @@ void system_state_controller() //[OK]
     minuto = String(Min);
   }
   String tiempo = hora + minuto;
-  ESP_LOGI(TAG, "Current Time: %s", tiempo);
-  ESP_LOGI(TAG, "Wake Up at: %i", ON);
-  ESP_LOGI(TAG, "Sleep at: %i", OFF);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Current Time: %s", tiempo);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Wake Up at: %i", ON);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Sleep at: %i", OFF);
 
   if (OFF > tiempo.toInt() && ON < tiempo.toInt())
   {
@@ -991,8 +979,8 @@ void system_state_controller() //[OK]
       }
       if (Sleep == "off")
       {
-        ESP_LOGI(TAG, "New Sleep.var value: %s", Sleep);
-        SysState = "on";
+        ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "New Sleep.var value: %s", Sleep);
+        SysState = ON_STATE;
         save_operation_state_in_fs();
       }
     }
@@ -1013,8 +1001,8 @@ void system_state_controller() //[OK]
       }
       if (Sleep == "on")
       {
-        ESP_LOGI(TAG, "New Sleep.var value: %s", Sleep);
-        SysState = "sleep";
+        ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "New Sleep.var value: %s", Sleep);
+        SysState = SLEEP;
         save_operation_state_in_fs();
       }
     }
@@ -1027,7 +1015,7 @@ double read_amb_temp_from_sensor() //[ok]
 {
   ambient_temp_sensor.requestTemperatures();
   float temperatureAmbC = ambient_temp_sensor.getTempCByIndex(0);
-  ESP_LOGI(TAG, "Ambient temperature: %3.2f °C", temperatureAmbC);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Ambient temperature: %3.2f °C", temperatureAmbC);
   if (temperatureAmbC == 85 || temperatureAmbC == -127)
   {
     error_logger("Error reading OneWire sensor - [Ambient temperature]");
@@ -1062,7 +1050,7 @@ void load_wifi_data_from_fs()
 
   if (error)
   {
-    ESP_LOGE(TAG, "[JSON] Deserialization error raised with code: %s", error.c_str());
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[JSON] Deserialization error raised with code: %s", error.c_str());
     return;
   }
 
@@ -1151,7 +1139,7 @@ void wifiloop() //[ok]
       lastMqttReconnect = millis();
       String client_id = "esp32-mqtt_client-";
       client_id += String(WiFi.macAddress());
-      ESP_LOGI(TAG, "[mqtt] client id: %s", client_id.c_str());
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[mqtt] client id: %s", client_id.c_str());
       digitalWrite(NETWORK_LED, HIGH); //led pulse begin...
       // Try mqtt connection to the broker.
       if (mqtt_client.connect(client_id.c_str(), mqtt_username, mqtt_password, willTopic, willQoS, willRetain, willMessage))
@@ -1173,7 +1161,7 @@ void wifiloop() //[ok]
       }
       else
       {
-        ESP_LOGE(TAG, "[mqtt] Fail MQTT Connection with state: %d", mqtt_client.state());
+        ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[mqtt] Fail MQTT Connection with state: %d", mqtt_client.state());
         digitalWrite(NETWORK_LED, LOW); // led pulse end...
         return;
       }
@@ -1210,21 +1198,29 @@ void read_manual_button_state() //[ok]
 
   if (digitalRead(MANUAL_BTN) == 0 && millis() - lastButtonPress > buttonTimeOut)
   {
-    info_logger("* Manual Button has been pressed..");
-    if (SysState == "on")
+    info_logger("Manual Button has been pressed..");
+
+    switch (SysState)
     {
+    case ON_STATE:
       info_logger("- Turning off the system.");
-      SysState = "off";
+      SysState = OFF_STATE;
       save_operation_state_in_fs();
       Envio = true;
-    }
-    else if (SysState == "off")
-    {
+      break;
+
+    case OFF_STATE:
       info_logger("Turning on the system.");
-      SysState = "on";
+      SysState = ON_STATE;
       save_operation_state_in_fs();
       Envio = true;
+      break;
+    
+    case SLEEP:
+      info_logger("imposible to turn on the system while sleep mode.");
+      break;
     }
+
     lastButtonPress = millis();
   }
 }
@@ -1236,9 +1232,21 @@ void notify_state_update_to_broker()
   {
     return;
   }
+  char* sysState_buffer = "off";
+  switch (SysState)
+  {
+  case ON_STATE:
+    sysState_buffer = "on";
+    break;
+  
+  case SLEEP:
+    sysState_buffer = "sleep";
+    break;
+  }
+
   PrevSysState = SysState; // assign PrevSysState the current SysState
   String pass = mqtt_password;
-  String message = SysState;
+  String message = sysState_buffer;
   message += ",";
   message += pass;
   message += ",";
@@ -1246,7 +1254,7 @@ void notify_state_update_to_broker()
   info_logger("Notifying MQTT broker on System State update..");
   // sending message.
   bool message_sent = mqtt_client.publish("device/stateNotification", message.c_str());
-  ESP_LOGI(TAG, "MQTT publish result: %s", message_sent ? "message sent!" : "fail");
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "MQTT publish result: %s", message_sent ? "message sent!" : "fail");
   return;
 }
 
@@ -1279,9 +1287,9 @@ void send_data_to_broker() //[ok]
 
   serializeJson(doc, output);
   info_logger("Publishing system variables to mqtt broker.");
-  ESP_LOGI(TAG, "Message: %s", output.c_str());
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Message: %s", output.c_str());
   bool mqtt_msg_sent = mqtt_client.publish("tago/data/post", output.c_str());
-  ESP_LOGI(TAG, "MQTT publish result: %s", mqtt_msg_sent ? "message sent!" : "fail");
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "MQTT publish result: %s", mqtt_msg_sent ? "message sent!" : "fail");
 
   // notify the user about state update...
   notify_state_update_to_broker();
@@ -1321,12 +1329,11 @@ void sensors_read(void *pvParameters)
       system_state_controller();
 
       // Funcion que regula latemperatura segun el modo (Cool, auto, fan)
-      temp_controller(tdecimal);
+      temp_setpoint_controller(tdecimal);
 
       // logging
-      ESP_LOGI(TAG, "System state: %s", SysState);
-      ESP_LOGI(TAG, "System function: %s", SysFunc);
-      ESP_LOGI(TAG, "Presence sensor: %s", MovingSensor ? "detecting": "empty room");
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "System state: %s", SysState);
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Presence sensor: %s", MovingSensor ? "detecting": "empty room");
     }
 
     // Check if the remote button is pressed
