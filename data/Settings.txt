@@ -1,5 +1,5 @@
 {
-  "value": "enable",
+  "value": false,
   "on_condition": "presence",
   "off_condition": "presence"
 }

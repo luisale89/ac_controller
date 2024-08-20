@@ -825,14 +825,14 @@ void process_settings_from_broker(String json) //[OK]
 
   const char *variable = doc["variable"]; // "timectrl"
 
-  if (String(variable) == "timectrl")
+  if (variable == "timectrl")
   {
     info_logger("timectrl settings adjustment.");
     // Aqui hay que guardar la configuracion del control de apagado encendido
     // Cambia el horario de encendido o apagado
     bool value = doc["enabled"];                //
-    String onCondition = doc["on_condition"];   //
-    String offCondition = doc["off_condition"]; //
+    const char *onCondition = doc["on_condition"];   //
+    const char *offCondition = doc["off_condition"]; //
     save_timectrl_settings_in_fs(value, onCondition, offCondition);
     delay(500);
     load_timectrl_settings_from_fs();
@@ -850,7 +850,7 @@ void process_settings_from_broker(String json) //[OK]
       save_schedule_in_fs(schedule_item_value_on, schedule_item_value_off, Day, schedule_item_value_enabled);
     }
   }
-  else if (String(variable) == "mode_config")
+  else if (variable == "mode_config")
   {
     info_logger("auto mode configuration settings.");
     // Cambia la configuracion del modo
@@ -859,11 +859,11 @@ void process_settings_from_broker(String json) //[OK]
     int temp = doc["temp"];           // 24
     save_auto_config_in_fs(wait, temp);
   }
-  else if (String(variable) == "system_mode")
+  else if (variable == "system_mode")
   {
     info_logger("system operation mode settings");
     // Cambia el modo de operacion
-    String value = doc["value"]; // "cool"
+    const char *value = doc["value"]; // "cool"
     save_operation_mode_in_fs(value);
   }
 }
@@ -892,7 +892,6 @@ void process_op_state_from_broker(String json) //[OK, OK]
   return;
 }
 
-//--
 //-- Operation functions --
 
 // Funcion que recibe la data de Tago por MQTT
