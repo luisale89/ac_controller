@@ -50,12 +50,10 @@ unsigned long lastConnectionTime = 0; // last time a message was sent to the bro
 unsigned long lastControllerTime = 0;
 unsigned long lastSaluteTime = 0;
 unsigned long lastButtonPress = 0;
-unsigned long lastCompressorTurnOff = 0;
 unsigned long lastWifiReconnect = 0;
 unsigned long lastMqttReconnect = 0;
 unsigned long lastNetworkLedBlink = 0;
 unsigned long postingInterval = 5L * 60000L;   // delay between updates, in milliseconds.. 5 minutes
-unsigned long CompressorTimeOut = 4L * 30000L; // 2 minutos de retardo para habilitar el compresor..
 unsigned long MovingSensorTime = 0;
 unsigned long AutoTimeOut = 0;                           // wati time for moving sensor and setpoint change
 const unsigned long buttonTimeOut = 5L * 1000L;          // rebound 5seconds
@@ -405,7 +403,36 @@ void save_operation_state_in_fs() //[OK] [OK]
   f.close();
 }
 
-// update rtc with time from ntp server {
+// Establece el encendido o apagado al inicio
+void load_operation_state_from_fs() //[OK] [OK]
+{
+  info_logger("[spiffs] loading operation state from fs");
+  if (!SPIFFS.begin(true))
+  {
+    error_logger("Ocurrió un error al ejecutar SPIFFS.");
+    return;
+  }
+
+  File file = SPIFFS.open("/Encendido.txt");
+
+  // Mensaje de fallo al leer el contenido
+  if (!file)
+  {
+    error_logger("Error al abrir el archivo.");
+    return;
+  }
+  String ESave = file.readString();
+  file.close();
+
+  if (ESave == "on") {SysState = ON_STATE;}
+  else if (ESave == "off") {SysState = OFF_STATE;}
+  else if (ESave == "sleep") {SysState = SLEEP;}
+  else {error_logger("Error: Bad value stored in Encendido.txt");}
+
+  return;
+}
+
+// update rtc with time from ntp server
 void update_rtc_from_ntp() // [OK] [OK]
 {
   struct tm timeinfo;
@@ -428,6 +455,7 @@ void update_rtc_from_ntp() // [OK] [OK]
   }
 }
 
+// -- callback when time is available from ntp server
 void timeavailable(struct timeval *tml) // [OK] [OK] 
 {
   // this should be called every hour automatically..
@@ -435,6 +463,7 @@ void timeavailable(struct timeval *tml) // [OK] [OK]
   update_rtc_from_ntp(); // update RTC with latest time from NTP server.
 }
 
+// Save timectrl settings in filesystem.
 void save_timectrl_settings_in_fs(bool value, String onCondition, String offCondition) //[OK]
 {
   info_logger("[spiffs] saving timectrl settings in file system.");
@@ -466,6 +495,7 @@ void save_timectrl_settings_in_fs(bool value, String onCondition, String offCond
   f.close();
 }
 
+// load timectrl settings from filesystem.
 void load_timectrl_settings_from_fs() //[OK]
 {
   info_logger("[spiffs] loading timectrl settings from file system.");
@@ -591,41 +621,18 @@ void save_operation_mode_in_fs(String Modo) //[OK]
   f.close();
 }
 
-// Lee la variable de encendio o apadado de tago
-void process_op_state_from_broker(String json) //[OK, OK]
+// Funcion que asigna el Modo almacenado a una variable local [x]
+void load_operation_mode_from_fs() //[OK]
 {
-  // String input;
-  StaticJsonDocument<96> doc;
-  DeserializationError error = deserializeJson(doc, json);
-  if (error)
-  {
-    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
-    return;
-  }
-  String variable = doc["variable"]; // "system_state"
-  String value = doc["value"];       // "on"
-  
-  if (value == "on") {SysState = ON_STATE;}
-  else if (value == "off") {SysState == OFF_STATE;}
-  else {
-    error_logger("Error: invalid value received from broker on -system_state-");
-    return;
-  }
-  save_operation_state_in_fs();
-  return;
-}
-
-// Establece el encendido o apagado al inicio
-void load_operation_state_from_fs() //[OK] [OK]
-{
-  info_logger("[spiffs] loading operation state from fs");
+  info_logger("loading operation mode from fs");
+  // Temperatura SetPoint
   if (!SPIFFS.begin(true))
   {
     error_logger("Ocurrió un error al ejecutar SPIFFS.");
     return;
   }
 
-  File file = SPIFFS.open("/Encendido.txt");
+  File file = SPIFFS.open("/Modo.txt");
 
   // Mensaje de fallo al leer el contenido
   if (!file)
@@ -633,15 +640,14 @@ void load_operation_state_from_fs() //[OK] [OK]
     error_logger("Error al abrir el archivo.");
     return;
   }
-  String ESave = file.readString();
+  String ReadModo = file.readString();
+  if (ReadModo == "auto") {SysMode == AUTO;}
+  else if (ReadModo == "fan") {SysMode == FAN;}
+  else if (ReadModo == "cool") {SysMode == COOL;}
+
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "operation mode loaded: %s Enum %s", ReadModo, SysMode);
+
   file.close();
-
-  if (ESave == "on") {SysState = ON_STATE;}
-  else if (ESave == "off") {SysState = OFF_STATE;}
-  else if (ESave == "sleep") {SysState = SLEEP;}
-  else {error_logger("Error: Bad value stored in Encendido.txt");}
-
-  return;
 }
 
 // Funcion que asigna las temperaturas predeterminadas a las variables globales
@@ -702,33 +708,107 @@ void load_temp_setpoint_from_fs()
   f.close();
 }
 
-// Funcion que asigna el Modo almacenado a una variable local [x]
-void load_operation_mode_from_fs() //[OK]
+// Guarda el Setpoint en SPIFF
+void process_temp_sp_from_broker(String json) //[OK]
 {
-  info_logger("loading operation mode from fs");
-  // Temperatura SetPoint
+  StaticJsonDocument<96> doc;
+  DeserializationError error = deserializeJson(doc, json);
+
+  if (error)
+  {
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
+    return;
+  }
+
+  String variable = doc["variable"]; // "user_setpoint"
+  int value = doc["value"];          // 24
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Temp. sp received: %d °C", value);
+
   if (!SPIFFS.begin(true))
   {
     error_logger("Ocurrió un error al ejecutar SPIFFS.");
     return;
   }
-
-  File file = SPIFFS.open("/Modo.txt");
+  File f = SPIFFS.open("/temp.txt", "w"); // Borra el contenido anterior del archivo
 
   // Mensaje de fallo al leer el contenido
-  if (!file)
+  if (!f)
   {
-    error_logger("Error al abrir el archivo.");
+    error_logger("Error al abrir el archivo");
+    delay(200);
     return;
   }
-  String ReadModo = file.readString();
-  if (ReadModo == "auto") {SysMode == AUTO;}
-  else if (ReadModo == "fan") {SysMode == FAN;}
-  else if (ReadModo == "cool") {SysMode == COOL;}
+  f.print(value);
+  SelectTemp = value;
+  f.close();
+}
 
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "operation mode loaded: %s Enum %s", ReadModo, SysMode);
+// carga los datos de la red wifi desde el spiffs.
+void load_wifi_data_from_fs()
+{
+  info_logger("[spiffs] loading WiFi data from fs.");
+  if (!SPIFFS.begin(true))
+  {
+    error_logger("[spiffs] Ocurrió un error al ejecutar SPIFFS.");
+    return;
+  }
 
-  file.close();
+  File f = SPIFFS.open("/WiFi.txt");
+
+  // Mensaje de fallo al leer el contenido
+  if (!f)
+  {
+    error_logger("[spiffs] Error al abrir el archivo.");
+    return;
+  }
+  String wifi_data = f.readString();
+  // String input;
+
+  StaticJsonDocument<256> doc1;
+  DeserializationError error = deserializeJson(doc1, wifi_data);
+
+  if (error)
+  {
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[JSON] Deserialization error raised with code: %s", error.c_str());
+    return;
+  }
+
+  esid = doc1["ssid"];
+  epass = doc1["pass"];
+
+  f.close();
+  return;
+}
+
+// guarda la configuración wifi recibida por smartConfig
+void save_wifi_data_in_fs()
+{
+  info_logger("[spiffs] Saving WiFi data in fs");
+  StaticJsonDocument<256> doc;
+  String output;
+
+  doc["ssid"] = WiFi.SSID();
+  doc["pass"] = WiFi.psk();
+
+  serializeJson(doc, output);
+  if (!SPIFFS.begin(true))
+  {
+    error_logger("[spiffs] Ocurrió un error al ejecutar SPIFFS.");
+    return;
+  }
+  File f = SPIFFS.open("/WiFi.txt", "w"); // Borra el contenido anterior del archivo
+
+  // Mensaje de fallo al leer el contenido
+  if (!f)
+  {
+    error_logger("[spiffs] Error al abrir el archivo...");
+    delay(200);
+    return;
+  }
+  f.println(output);
+  f.close();
+  info_logger("[spiffs] WiFi data saved!");
+  return;
 }
 
 // Guarda la configuracion que se envia en el topico
@@ -788,40 +868,32 @@ void process_settings_from_broker(String json) //[OK]
   }
 }
 
-// Guarda el Setpoint en SPIFF
-void process_temp_sp_from_broker(String json) //[OK]
+// Lee la variable de encendio o apadado de tago
+void process_op_state_from_broker(String json) //[OK, OK]
 {
+  // String input;
   StaticJsonDocument<96> doc;
   DeserializationError error = deserializeJson(doc, json);
-
   if (error)
   {
     ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
     return;
   }
-
-  String variable = doc["variable"]; // "user_setpoint"
-  int value = doc["value"];          // 24
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Temp. sp received: %d °C", value);
-
-  if (!SPIFFS.begin(true))
-  {
-    error_logger("Ocurrió un error al ejecutar SPIFFS.");
+  String variable = doc["variable"]; // "system_state"
+  String value = doc["value"];       // "on"
+  
+  if (value == "on") {SysState = ON_STATE;}
+  else if (value == "off") {SysState = OFF_STATE;}
+  else {
+    error_logger("Error: invalid value received from broker on -system_state-");
     return;
   }
-  File f = SPIFFS.open("/temp.txt", "w"); // Borra el contenido anterior del archivo
-
-  // Mensaje de fallo al leer el contenido
-  if (!f)
-  {
-    error_logger("Error al abrir el archivo");
-    delay(200);
-    return;
-  }
-  f.print(value);
-  SelectTemp = value;
-  f.close();
+  save_operation_state_in_fs();
+  return;
 }
+
+//--
+//-- Operation functions --
 
 // Funcion que recibe la data de Tago por MQTT
 void mqtt_message_callback(char *topicp, byte *payload, unsigned int length) //[OK]
@@ -1022,74 +1094,6 @@ double read_amb_temp_from_sensor() //[ok]
     return ambient_temp; // return las valid value from ambient_temp variable..
   }
   return temperatureAmbC;
-}
-
-// carga los datos de la red wifi desde el spiffs.
-void load_wifi_data_from_fs()
-{
-  info_logger("[spiffs] loading WiFi data from fs.");
-  if (!SPIFFS.begin(true))
-  {
-    error_logger("[spiffs] Ocurrió un error al ejecutar SPIFFS.");
-    return;
-  }
-
-  File f = SPIFFS.open("/WiFi.txt");
-
-  // Mensaje de fallo al leer el contenido
-  if (!f)
-  {
-    error_logger("[spiffs] Error al abrir el archivo.");
-    return;
-  }
-  String wifi_data = f.readString();
-  // String input;
-
-  StaticJsonDocument<256> doc1;
-  DeserializationError error = deserializeJson(doc1, wifi_data);
-
-  if (error)
-  {
-    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[JSON] Deserialization error raised with code: %s", error.c_str());
-    return;
-  }
-
-  esid = doc1["ssid"];
-  epass = doc1["pass"];
-
-  f.close();
-  return;
-}
-
-// guarda la configuración wifi recibida por smartConfig
-void save_wifi_data_in_fs()
-{
-  info_logger("[spiffs] Saving WiFi data in fs");
-  StaticJsonDocument<256> doc;
-  String output;
-
-  doc["ssid"] = WiFi.SSID();
-  doc["pass"] = WiFi.psk();
-
-  serializeJson(doc, output);
-  if (!SPIFFS.begin(true))
-  {
-    error_logger("[spiffs] Ocurrió un error al ejecutar SPIFFS.");
-    return;
-  }
-  File f = SPIFFS.open("/WiFi.txt", "w"); // Borra el contenido anterior del archivo
-
-  // Mensaje de fallo al leer el contenido
-  if (!f)
-  {
-    error_logger("[spiffs] Error al abrir el archivo...");
-    delay(200);
-    return;
-  }
-  f.println(output);
-  f.close();
-  info_logger("[spiffs] WiFi data saved!");
-  return;
 }
 
 // Este loop verifica que el wifi este conectado correctamente
@@ -1353,6 +1357,7 @@ void sensors_read(void *pvParameters)
   }
 }
 
+// -- Setup
 void setup()
 {
   Serial.begin(115200);
@@ -1399,7 +1404,6 @@ void setup()
   load_timectrl_settings_from_fs(); // timectrl settings
   load_wifi_data_from_fs();         // load wifi data from filesystem
   info_logger("SPIFF system ok.");
-  lastCompressorTurnOff = millis(); // set now as the last time the compressor was turned off.. prevents startup after blackout
   // --- continue
 
   // WifiSettings
