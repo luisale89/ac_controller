@@ -78,8 +78,8 @@ bool Envio = false;
 TaskHandle_t Task1;
 
 // WIFI VARIABLES
-char* esid = "";
-char* epass = "";
+String esid = "";
+String epass = "";
 const char* AP_SSID = "AC-HUB";
 const char* AP_PASS = AP_PASSWORD;
 WiFiClient espClient;
@@ -92,22 +92,26 @@ RTC_DS3231 DS3231_RTC;
 char Week_days[7][12] = {"Domingo", "Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado"};
 
 // Variables de configuracion
-enum SysModeEnum {AUTO, FAN, COOL};
-enum SysStateEnum {ON_STATE, OFF_STATE, SLEEP};
-SysStateEnum SysState = OFF_STATE;
-SysStateEnum PrevSysState = OFF_STATE;
-SysModeEnum SysMode = AUTO;
+// Enum classes
+enum SysModeEnum {AUTO_MODE, FAN_MODE, COOL_MODE};
+enum SysStateEnum {SYSTEM_ON, SYSTEM_OFF, SYSTEM_SLEEP};
+enum FlowFlag {FLAG_UP, FLAG_DOWN, FLAG_UNSET};
+enum SleepWakeCondition {SLEEP_ON_TIME, SLEEP_ON_ABSENCE, WAKE_ON_TIME, WAKE_ON_PRESENCE};
+// Enum vars
+SysStateEnum SysState = SYSTEM_OFF;
+SysStateEnum PrevSysState = SYSTEM_OFF;
+SysModeEnum SysMode = AUTO_MODE;
+FlowFlag sleep_flag = FLAG_UNSET;
+SleepWakeCondition sleep_condition = SLEEP_ON_TIME;
+SleepWakeCondition wake_condition = WAKE_ON_TIME;
 
 //--
-String on_condition;
-String off_condition;
-String Sleep = "undef"; // first value for Sleep variable
 float SelectTemp;
 float AutoTemp;
 float CurrentSysTemp;
 bool Salute = false;
 bool MovingSensor = false;
-bool schedule_enabled; // Variables de activacion del modo sleep
+bool sleep_control_enabled; // Variables de activacion del modo sleep
 double ambient_temp = 22;
 int ds_sensor_resolution = 10; //bits
 int tempRequestDelay = 0;
@@ -321,7 +325,7 @@ void set_AP_for_ESPNOW_offline_mode() {
 
 void test_AP_for_ESPNOW_online_mode(){
   info_logger("[wifi] Setting up to communicate over esp_now while device is online.");
-  WiFi.begin(esid, epass);
+  WiFi.begin(esid.c_str(), epass.c_str());
   wifi_reconnect_attempt = 0;
 }
 
@@ -398,11 +402,22 @@ void save_operation_state_in_fs() //[OK] [OK]
     delay(200);
     return;
   }
-  char* buffer_state = "off";
-  if (SysState == ON_STATE){buffer_state = "on";}
-  else if (SysState == SLEEP){buffer_state = "sleep";}
+
+  switch (SysState)
+  {
+  case SYSTEM_ON:
+    f.print("on");
+    break;
   
-  f.print(buffer_state);
+  case SYSTEM_OFF:
+    f.print("off");
+    break;
+
+  case SYSTEM_SLEEP:
+    f.print("sleep");
+    break;
+
+  }
   f.close();
 }
 
@@ -427,9 +442,9 @@ void load_operation_state_from_fs() //[OK] [OK]
   String ESave = file.readString();
   file.close();
 
-  if (ESave == "on") {SysState = ON_STATE;}
-  else if (ESave == "off") {SysState = OFF_STATE;}
-  else if (ESave == "sleep") {SysState = SLEEP;}
+  if (ESave == "on") {SysState = SYSTEM_ON;}
+  else if (ESave == "off") {SysState = SYSTEM_OFF;}
+  else if (ESave == "sleep") {SysState = SYSTEM_SLEEP;}
   else {error_logger("Error: Bad value stored in Encendido.txt");}
 
   return;
@@ -467,15 +482,15 @@ void timeavailable(struct timeval *tml) // [OK] [OK]
 }
 
 // Save timectrl settings in filesystem.
-void save_timectrl_settings_in_fs(bool value, String onCondition, String offCondition) //[OK]
+void save_timectrl_settings_in_fs() //[OK]
 {
   info_logger("[spiffs] saving timectrl settings in file system.");
   String timectrl_setting;
   StaticJsonDocument<96> doc;
 
-  doc["value"] = value;
-  doc["on_condition"] = onCondition;
-  doc["off_condition"] = offCondition;
+  doc["value"] = sleep_control_enabled;
+  if (wake_condition == WAKE_ON_TIME) {doc["on_condition"] = "on_time";} else {doc["on_condition"] = "presence";}
+  if (sleep_condition == SLEEP_ON_TIME) {doc["off_condition"] = "on_time";} else {doc["off_condition"] = "presence";}
 
   serializeJson(doc, timectrl_setting);
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "data to save in filesystem: %s", timectrl_setting.c_str());
@@ -528,11 +543,10 @@ void load_timectrl_settings_from_fs() //[OK]
     return;
   }
 
-  schedule_enabled = doc1["value"];
-  String onCondition = doc1["on_condition"];
-  String offCondition = doc1["off_condition"];
-  on_condition = onCondition;
-  off_condition = offCondition;
+  sleep_control_enabled = doc1["value"];
+  if (doc1["on_condition"] == "on_time") {wake_condition = WAKE_ON_TIME;} else {wake_condition == WAKE_ON_PRESENCE;}
+  if (doc1["off_condition"] == "on_time") {sleep_condition == SLEEP_ON_TIME;} else {sleep_condition == SLEEP_ON_ABSENCE;}
+
   f.close();
 }
 
@@ -599,7 +613,7 @@ void save_auto_config_in_fs(int wait, int temp)
 }
 
 // Aqui se guarda el modo que llega desde el topico
-void save_operation_mode_in_fs(String Modo) //[OK]
+void save_operation_mode_in_fs() //[OK]
 {
   info_logger("[spiffs] saving operation mode in file system.");
   if (!SPIFFS.begin(true))
@@ -616,11 +630,22 @@ void save_operation_mode_in_fs(String Modo) //[OK]
     delay(200);
     return;
   }
-  char* mode_buffer = "auto";
-  if (SysMode == FAN) {mode_buffer = "fan";}
-  else if (SysMode == COOL) {mode_buffer = "cool";}
 
-  f.print(mode_buffer);
+  switch (SysMode)
+  {
+  case AUTO_MODE:
+    f.print("auto");
+    break;
+
+  case FAN_MODE:
+    f.print("fan");
+    break;
+
+  case COOL_MODE:
+    f.print("cool");
+    break;
+  }
+  
   f.close();
 }
 
@@ -644,9 +669,9 @@ void load_operation_mode_from_fs() //[OK]
     return;
   }
   String ReadModo = file.readString();
-  if (ReadModo == "auto") {SysMode == AUTO;}
-  else if (ReadModo == "fan") {SysMode == FAN;}
-  else if (ReadModo == "cool") {SysMode == COOL;}
+  if (ReadModo == "auto") {SysMode == AUTO_MODE;}
+  else if (ReadModo == "fan") {SysMode == FAN_MODE;}
+  else if (ReadModo == "cool") {SysMode == COOL_MODE;}
 
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "operation mode loaded: %s Enum %s", ReadModo, SysMode);
 
@@ -674,12 +699,12 @@ void load_temp_setpoint_from_fs()
   }
   String ReadTemp = file.readString();
   SelectTemp = ReadTemp.toFloat();
-  file.close();
   CurrentSysTemp = SelectTemp;
+  file.close();
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "NORMAL Temp. loaded: %3.2f °C", CurrentSysTemp);
 
   // Temperatura en Auto
-  info_logger("loading AUTO setpoints from fs");
+  info_logger("loading AUTO_MODE setpoints from fs");
   if (!SPIFFS.begin(true))
   {
     error_logger("Ocurrió un error al ejecutar SPIFFS.");
@@ -775,9 +800,10 @@ void load_wifi_data_from_fs()
     ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[JSON] Deserialization error raised with code: %s", error.c_str());
     return;
   }
-
-  esid = doc1["ssid"];
-  epass = doc1["pass"];
+  String ESID = doc1["ssid"];
+  String EPAS = doc1["pass"];
+  esid = ESID;
+  epass = EPAS;
 
   f.close();
   return;
@@ -833,12 +859,10 @@ void process_settings_from_broker(String json) //[OK]
     info_logger("timectrl settings adjustment.");
     // Aqui hay que guardar la configuracion del control de apagado encendido
     // Cambia el horario de encendido o apagado
-    bool value = doc["enabled"];                //
-    const char *onCondition = doc["on_condition"];   //
-    const char *offCondition = doc["off_condition"]; //
-    save_timectrl_settings_in_fs(value, onCondition, offCondition);
-    delay(500);
-    load_timectrl_settings_from_fs();
+    sleep_control_enabled = doc["enabled"];          //
+    if (doc["on_condition"] == "on_time") {wake_condition = WAKE_ON_TIME;} else {wake_condition = WAKE_ON_PRESENCE;}
+    if (doc["off_condition"] == "on_time") {sleep_condition = SLEEP_ON_TIME;} else {sleep_condition = SLEEP_ON_ABSENCE;}
+    save_timectrl_settings_in_fs();
 
     for (JsonPair schedule_item : doc["schedule"].as<JsonObject>())
     {
@@ -867,7 +891,10 @@ void process_settings_from_broker(String json) //[OK]
     info_logger("system operation mode settings");
     // Cambia el modo de operacion
     const char *value = doc["value"]; // "cool"
-    save_operation_mode_in_fs(value);
+    if (value == "cool") {SysMode = COOL_MODE;}
+    if (value == "fan") {SysMode = FAN_MODE;}
+    if (value == "auto") {SysMode = AUTO_MODE;} 
+    save_operation_mode_in_fs();
   }
 }
 
@@ -885,8 +912,8 @@ void process_op_state_from_broker(String json) //[OK, OK]
   String variable = doc["variable"]; // "system_state"
   String value = doc["value"];       // "on"
   
-  if (value == "on") {SysState = ON_STATE;}
-  else if (value == "off") {SysState = OFF_STATE;}
+  if (value == "on") {SysState = SYSTEM_ON;}
+  else if (value == "off") {SysState = SYSTEM_OFF;}
   else {
     error_logger("Error: invalid value received from broker on -system_state-");
     return;
@@ -946,7 +973,7 @@ void temp_setpoint_controller() // [OK]
   info_logger("Exec. temp_setpoint_controller");
   switch (SysMode)
   {
-  case AUTO:
+  case AUTO_MODE:
     if (MovingSensor) {
       MovingSensorTime = millis();
       CurrentSysTemp = SelectTemp;
@@ -956,7 +983,7 @@ void temp_setpoint_controller() // [OK]
     }
     break;
 
-  case COOL:
+  case COOL_MODE:
     CurrentSysTemp = SelectTemp;
     break;
 
@@ -972,10 +999,10 @@ void sleep_state_controller() //[OK]
 {
   info_logger("Exec. sleep_state_controller");
 
-  if (!schedule_enabled)
+  if (!sleep_control_enabled)
   {
     info_logger("Schedule disabled.");
-    Sleep = "off";
+    sleep_flag = FLAG_DOWN;
     return;
   }
 
@@ -1015,7 +1042,7 @@ void sleep_state_controller() //[OK]
   
   if (!SLEEP_ENABLED)
   {
-    Sleep = "off";
+    sleep_flag = FLAG_DOWN;
     return;
   }
 
@@ -1037,44 +1064,45 @@ void sleep_state_controller() //[OK]
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Wake Up at: %i", WAKE_TIME);
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Sleep at: %i", SLEEP_TIME);
 
-  if (SLEEP_TIME > tiempo.toInt() && WAKE_TIME < tiempo.toInt())
+  if (SLEEP_TIME > tiempo.toInt() && WAKE_TIME < tiempo.toInt()) // horario para el sleep...
   {
     // Si el sleep está activado, o si es la primera verificación después del arranque..
-    if (Sleep == "on" || Sleep == "undef")
+    if (sleep_flag == FLAG_UP || sleep_flag == FLAG_UNSET)
     {
-      if (on_condition == "presence" && MovingSensor)
+      switch (wake_condition)
       {
-        Sleep = "off";
-      }
-      else if (on_condition == "on_time")
-      {
-        Sleep = "off";
-      }
-      if (Sleep == "off")
-      {
-        ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "New Sleep.var value: %s", Sleep);
-        SysState = ON_STATE;
+      case WAKE_ON_PRESENCE:
+        if (MovingSensor) {
+          sleep_flag = FLAG_DOWN;
+          SysState = SYSTEM_ON;
+        }
+        break;
+      
+      case WAKE_ON_TIME:
+        sleep_flag = FLAG_DOWN;
+        SysState = SYSTEM_ON;
+        break;
       }
     }
   }
   else
-  {
-    if (Sleep == "off" || Sleep == "undef")
+  { // horario fuera del sleep.
+    // si el sleep está apagado, o si es la primera verificación después del arranque..
+    if (sleep_flag == FLAG_DOWN || sleep_flag == FLAG_UNSET)
     {
-      if (off_condition == "presence" && !MovingSensor)
+      switch (sleep_condition)
       {
-        // SleepState
-        Sleep = "on";
-      }
-      else if (off_condition == "on_time")
-      {
-        // SleepState
-        Sleep = "on";
-      }
-      if (Sleep == "on")
-      {
-        ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "New Sleep.var value: %s", Sleep);
-        SysState = SLEEP;
+      case SLEEP_ON_ABSENCE:
+        if(!MovingSensor){
+          sleep_flag = FLAG_UP;
+          SysState = SYSTEM_SLEEP;
+        }
+        break;
+      
+      case SLEEP_ON_TIME:
+        sleep_flag = FLAG_UP;
+        SysState = SYSTEM_SLEEP;
+        break;
       }
     }
   }
@@ -1160,10 +1188,8 @@ void wifiloop() //[ok]
         info_logger("[mqtt] Subscribing to mqtt topics:");
         mqtt_client.subscribe(topic);
         info_logger("[mqtt] Topic 1 ok");
-        delay(1000);
         mqtt_client.subscribe(topic_2);
         info_logger("[mqtt] Topic 2 ok");
-        delay(1000);
         mqtt_client.subscribe(topic_3);
         info_logger("[mqtt] Topic 3 ok");
         lastSaluteTime = millis();
@@ -1216,17 +1242,17 @@ void update_IO() //[ok]
 
     switch (SysState)
     {
-    case ON_STATE:
+    case SYSTEM_ON:
       info_logger("- Turning off the system.");
-      SysState = OFF_STATE;
+      SysState = SYSTEM_OFF;
       break;
 
-    case OFF_STATE:
+    case SYSTEM_OFF:
       info_logger("Turning on the system.");
-      SysState = ON_STATE;
+      SysState = SYSTEM_ON;
       break;
     
-    case SLEEP:
+    case SYSTEM_SLEEP:
       info_logger("imposible to turn on the system on sleep mode.");
       break;
     }
@@ -1246,14 +1272,14 @@ void notify_state_update_to_broker()
   PrevSysState = SysState; // assign PrevSysState the current SysState
   save_operation_state_in_fs();
 
-  char* sysState_buffer = "off";
+  String sysState_buffer = "off";
   switch (SysState)
   {
-  case ON_STATE:
+  case SYSTEM_ON:
     sysState_buffer = "on";
     break;
   
-  case SLEEP:
+  case SYSTEM_SLEEP:
     sysState_buffer = "sleep";
     break;
   }
@@ -1282,7 +1308,7 @@ void send_data_to_broker() //[ok]
   double tdecimal = (int)(ambient_temp * 100 + 0.5) / 100.0;
 
   String timectrl;
-  timectrl = schedule_enabled ? "on": "off";
+  timectrl = sleep_control_enabled ? "on": "off";
   // json todas las variables, falta recoleccion
   String output;
   StaticJsonDocument<256> doc;
@@ -1307,7 +1333,7 @@ void send_data_to_broker() //[ok]
   //update posting interval value
   switch (SysState)
   {
-  case ON_STATE:
+  case SYSTEM_ON:
     postingInterval = 2L * 30000L; // 1 minuto.
     break;
   
@@ -1419,10 +1445,10 @@ void setup()
   info_logger("WiFi settings and config.");
   WiFi.onEvent(WiFiEvent);
   WiFi.disconnect();
-  delay(1000);            // 1 second delay
+  delay(500);
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(AP_SSID, AP_PASS, 1, 1); //channel 1, hidden ssid
-  WiFi.begin(esid, epass);
+  WiFi.begin(esid.c_str(), epass.c_str());
   info_logger("WiFi settings ok.");
   //---------------------------------------- esp_now settings
   info_logger("Setting up ESP_NOW");
