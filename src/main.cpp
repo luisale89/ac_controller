@@ -43,7 +43,7 @@ int network_led_state = LOW;
 OneWire oneWireAmbTemp(AMB_TEMP);
 
 // Pass our oneWire reference to Dallas Temperature sensor
-DallasTemperature ambient_temp_sensor(&oneWireAmbTemp);
+DallasTemperature ambient_t_sensor(&oneWireAmbTemp);
 
 // Time Variables
 unsigned long lastConnectionTime = 0; // last time a message was sent to the broker, in milliseconds
@@ -56,6 +56,7 @@ unsigned long lastNetworkLedBlink = 0;
 unsigned long postingInterval = 5L * 60000L;   // delay between updates, in milliseconds.. 5 minutes
 unsigned long MovingSensorTime = 0;
 unsigned long AutoTimeOut = 0;                           // wati time for moving sensor and setpoint change
+unsigned long lastTempRequest = 0;
 const unsigned long buttonTimeOut = 5L * 1000L;          // rebound 5seconds
 const unsigned long controllerInterval = 2L * 5000L;     // delay between sensor updates, 10 seconds
 const unsigned long SaluteTimer = 1L * 30000L;           // Tiempo para enviar que el dispositivo esta conectado,
@@ -108,6 +109,8 @@ bool Salute = false;
 bool MovingSensor = false;
 bool schedule_enabled; // Variables de activacion del modo sleep
 double ambient_temp = 22;
+int ds_sensor_resolution = 10; //bits
+int tempRequestDelay = 0;
 
 // NTP
 const char *ntpServer = "pool.ntp.org";
@@ -888,7 +891,6 @@ void process_op_state_from_broker(String json) //[OK, OK]
     error_logger("Error: invalid value received from broker on -system_state-");
     return;
   }
-  save_operation_state_in_fs();
   return;
 }
 
@@ -939,11 +941,9 @@ void mqtt_message_callback(char *topicp, byte *payload, unsigned int length) //[
 }
 
 // Funcion que regula la temperatura
-void temp_setpoint_controller(float temp) // [OK]
+void temp_setpoint_controller() // [OK]
 {
-  // [bug] system does not responds on setpoint change when auto mode is set.
-  //  SelectTemp by default.
-
+  info_logger("Exec. temp_setpoint_controller");
   switch (SysMode)
   {
   case AUTO:
@@ -968,8 +968,9 @@ void temp_setpoint_controller(float temp) // [OK]
 }
 
 //funcion que ajusta el estado del sistema en funcion del horario y otros parametros.
-void system_state_controller() //[OK]
+void sleep_state_controller() //[OK]
 {
+  info_logger("Exec. sleep_state_controller");
 
   if (!schedule_enabled)
   {
@@ -995,6 +996,7 @@ void system_state_controller() //[OK]
     error_logger("Error al abrir el archivo.");
     return;
   }
+
   String AutoOff = file.readString();
   file.close();
 
@@ -1007,11 +1009,11 @@ void system_state_controller() //[OK]
     return;
   }
 
-  int ON = doc["ON"];   // "0730"
-  int OFF = doc["OFF"]; // "2130"
-  bool enable = doc["enable"];
+  int WAKE_TIME = doc["ON"];   // "0730"
+  int SLEEP_TIME = doc["OFF"]; // "2130"
+  bool SLEEP_ENABLED = doc["enable"];
   
-  if (!enable)
+  if (!SLEEP_ENABLED)
   {
     Sleep = "off";
     return;
@@ -1032,10 +1034,10 @@ void system_state_controller() //[OK]
   }
   String tiempo = hora + minuto;
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Current Time: %s", tiempo);
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Wake Up at: %i", ON);
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Sleep at: %i", OFF);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Wake Up at: %i", WAKE_TIME);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Sleep at: %i", SLEEP_TIME);
 
-  if (OFF > tiempo.toInt() && ON < tiempo.toInt())
+  if (SLEEP_TIME > tiempo.toInt() && WAKE_TIME < tiempo.toInt())
   {
     // Si el sleep está activado, o si es la primera verificación después del arranque..
     if (Sleep == "on" || Sleep == "undef")
@@ -1052,7 +1054,6 @@ void system_state_controller() //[OK]
       {
         ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "New Sleep.var value: %s", Sleep);
         SysState = ON_STATE;
-        save_operation_state_in_fs();
       }
     }
   }
@@ -1074,7 +1075,6 @@ void system_state_controller() //[OK]
       {
         ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "New Sleep.var value: %s", Sleep);
         SysState = SLEEP;
-        save_operation_state_in_fs();
       }
     }
   }
@@ -1082,24 +1082,32 @@ void system_state_controller() //[OK]
 }
 
 // Lee temperatura
-double read_amb_temp_from_sensor() //[ok]
+void update_ambient_temperature() // defining
 {
-  ambient_temp_sensor.requestTemperatures();
-  float temperatureAmbC = ambient_temp_sensor.getTempCByIndex(0);
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Ambient temperature: %3.2f °C", temperatureAmbC);
-  if (temperatureAmbC == 85 || temperatureAmbC == -127)
-  {
-    error_logger("Error reading OneWire sensor - [Ambient temperature]");
-    return ambient_temp; // return las valid value from ambient_temp variable..
+  if (millis() - lastTempRequest >= tempRequestDelay) {
+    //-
+    info_logger("reading temperature from DS18B20...");
+    double AmbTempBuffer = ambient_t_sensor.getTempCByIndex(0);
+    ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Ambient temperature: %3.2f °C", AmbTempBuffer);
+    if (AmbTempBuffer == -127)
+    {
+      error_logger("Error reading OneWire sensor - [Ambient temperature]");
+      return;
+    }
+    // update global variable.
+    ambient_temp = AmbTempBuffer;
+    ambient_t_sensor.requestTemperatures();
+    lastTempRequest = millis();
   }
-  return temperatureAmbC;
+  return;
 }
 
 // Este loop verifica que el wifi este conectado correctamente
 void wifiloop() //[ok]
 {
   // only wait for SmartConfig when the AP button is pressed.
-  if ((digitalRead(AP_BTN) == 0))
+  const bool ap_btn_pressed = digitalRead(AP_BTN) ? false : true;
+  if (ap_btn_pressed)
   {
     info_logger("[wifi] the AP button has been pressed, setting up new wifi network*");
     info_logger("[wifi] Waiting for SmartConfig...");
@@ -1194,12 +1202,15 @@ void wifiloop() //[ok]
   }
 }
 
-// Codigo del boton de interrupcion
-void read_manual_button_state() //[ok]
+// Atualiza estado de entradas y salidas digitales.
+void update_IO() //[ok]
 {
-  // Apaga o enciende el aire depediendo del estado
 
-  if (digitalRead(MANUAL_BTN) == 0 && millis() - lastButtonPress > buttonTimeOut)
+  // Lectura de sensor de movimiento.
+  MovingSensor = digitalRead(RADAR) ? true : false;
+  // Apaga o enciende el aire depediendo del estado
+  const bool btn_manual = digitalRead(MANUAL_BTN) ? false : true; // input = 0 means button pressed
+  if (btn_manual && millis() - lastButtonPress > buttonTimeOut)
   {
     info_logger("Manual Button has been pressed..");
 
@@ -1208,19 +1219,15 @@ void read_manual_button_state() //[ok]
     case ON_STATE:
       info_logger("- Turning off the system.");
       SysState = OFF_STATE;
-      save_operation_state_in_fs();
-      Envio = true;
       break;
 
     case OFF_STATE:
       info_logger("Turning on the system.");
       SysState = ON_STATE;
-      save_operation_state_in_fs();
-      Envio = true;
       break;
     
     case SLEEP:
-      info_logger("imposible to turn on the system while sleep mode.");
+      info_logger("imposible to turn on the system on sleep mode.");
       break;
     }
 
@@ -1235,6 +1242,10 @@ void notify_state_update_to_broker()
   {
     return;
   }
+
+  PrevSysState = SysState; // assign PrevSysState the current SysState
+  save_operation_state_in_fs();
+
   char* sysState_buffer = "off";
   switch (SysState)
   {
@@ -1247,7 +1258,6 @@ void notify_state_update_to_broker()
     break;
   }
 
-  PrevSysState = SysState; // assign PrevSysState the current SysState
   String pass = mqtt_password;
   String message = sysState_buffer;
   message += ",";
@@ -1294,18 +1304,17 @@ void send_data_to_broker() //[ok]
   bool mqtt_msg_sent = mqtt_client.publish("tago/data/post", output.c_str());
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "MQTT publish result: %s", mqtt_msg_sent ? "message sent!" : "fail");
 
-  // notify the user about state update...
-  notify_state_update_to_broker();
-
-  // // update postingInterval, lower if the system is on
-  // if (SysState == "on")
-  // {
-  //   postingInterval = 2L * 30000L; // 1 minuto.
-  // }
-  // else
-  // {
-  //   postingInterval = 5L * 60000L; // 5 minutos.
-  // }
+  //update posting interval value
+  switch (SysState)
+  {
+  case ON_STATE:
+    postingInterval = 2L * 30000L; // 1 minuto.
+    break;
+  
+  default:
+    postingInterval = 5L * 60000L; // 5 minutos.
+    break;
+  }
 
   Envio = false;
   lastConnectionTime = millis();
@@ -1318,29 +1327,20 @@ void sensors_read(void *pvParameters)
   const TickType_t xDelay = 50 / portTICK_PERIOD_MS;
   for (;;)
   { 
-    // Lectura de sensor de movimiento va aqui
-    MovingSensor = digitalRead(RADAR) ? true : false;
-
     if (millis() - lastControllerTime > controllerInterval)
     {
-      info_logger("* Updating sensor readings and exec.controllers");
-      lastControllerTime = millis();
-      ambient_temp = read_amb_temp_from_sensor();
-      double tdecimal = (int)(ambient_temp * 100 + 0.5) / 100.0;
-
       // Funcion que controla el apagado y encendido automatico (Sleep)
-      system_state_controller();
-
+      sleep_state_controller();
       // Funcion que regula latemperatura segun el modo (Cool, auto, fan)
-      temp_setpoint_controller(tdecimal);
+      temp_setpoint_controller();
 
       // logging
       ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "System state: %s", SysState);
       ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Presence sensor: %s", MovingSensor ? "detecting": "empty room");
-    }
 
-    // Check if the remote button is pressed
-    read_manual_button_state();
+      // update time var
+      lastControllerTime = millis();
+    }
 
     // flag to send data to tago.io
     if (millis() - lastConnectionTime > postingInterval)
@@ -1348,7 +1348,13 @@ void sensors_read(void *pvParameters)
       Envio = true;
     }
 
-    //send data to the mqtt broker
+    //lee temperatura ambiente
+    update_ambient_temperature();
+    // Update inputs and outputs
+    update_IO();
+    //notify the user about state update...
+    notify_state_update_to_broker();
+    //send all the sensor data to the mqtt broker
     send_data_to_broker();
 
     // task delay
@@ -1390,9 +1396,13 @@ void setup()
   info_logger("RTC ok.");
 
   // Inicio Sensores OneWire
-  info_logger("OneWire sensors inisialization!");
-  ambient_temp_sensor.begin();
-  delay(1000);
+  info_logger("OneWire sensors configuration!");
+  ambient_t_sensor.begin();
+  ambient_t_sensor.setResolution(ds_sensor_resolution);
+  ambient_t_sensor.setWaitForConversion(false);
+  ambient_t_sensor.requestTemperatures();
+  lastTempRequest = millis();
+  tempRequestDelay = 750 / (1 << (12 - ds_sensor_resolution));
   info_logger("OneWire sensors ok.");
 
   // set default values from .txt files
