@@ -54,13 +54,15 @@ unsigned long lastWifiReconnect = 0;
 unsigned long lastMqttReconnect = 0;
 unsigned long lastNetworkLedBlink = 0;
 unsigned long postingInterval = 5L * 60000L;   // delay between updates, in milliseconds.. 5 minutes
-unsigned long MovingSensorTime = 0;
+unsigned long radarStateTime = 0;
 unsigned long AutoTimeOut = 0;                           // wati time for moving sensor and setpoint change
 unsigned long lastTempRequest = 0;
+unsigned long lastRadarChange = 0;
+const unsigned long radarDebounceTime = 5L * 60000L;      // 5 minutes rebound for radar sensor.
 const unsigned long buttonTimeOut = 5L * 1000L;          // rebound 5seconds
 const unsigned long controllerInterval = 2L * 5000L;     // delay between sensor updates, 10 seconds
 const unsigned long SaluteTimer = 1L * 30000L;           // Tiempo para enviar que el dispositivo esta conectado,
-const unsigned long wifiReconnectInterval = 1 * 30000L;  // 30 segundos para intentar reconectar al wifi.
+const unsigned long wifiReconnectInterval = 5L * 60000L;  // 5 minutos para intentar reconectar al wifi.
 const unsigned long mqttReconnectInterval = 1L * 10000L; // 10 segundos para intentar reconectar al broker mqtt.
 const unsigned long wifiDisconnectedLedInterval = 250;        // 250 ms
 
@@ -84,8 +86,8 @@ const char* AP_SSID = "AC-HUB";
 const char* AP_PASS = AP_PASSWORD;
 WiFiClient espClient;
 PubSubClient mqtt_client(espClient);
-int wifi_reconnect_attempt = 0;
-const int MAX_RECONNECT_ATTEMPTS = 22; // two times on every channel.
+int wiFiReconnectAttempt = 0;
+const int MAX_RECONNECT_ATTEMPTS = 33; // three times on every channel.
 
 // RTC
 RTC_DS3231 DS3231_RTC;
@@ -110,10 +112,11 @@ float SelectTemp;
 float AutoTemp;
 float CurrentSysTemp;
 bool Salute = false;
-bool MovingSensor = false;
-bool sleep_control_enabled; // Variables de activacion del modo sleep
+bool radarState = false;
+bool lastRadarState = false;
+bool sleepControlEnabled; // Variables de activacion del modo sleep
 double ambient_temp = 22;
-int ds_sensor_resolution = 10; //bits
+int tempSensorResolution = 10; //bits
 int tempRequestDelay = 0;
 
 // NTP
@@ -127,7 +130,6 @@ int32_t WiFi_channel = 1;
 
 enum MessageType {PAIRING, DATA,};
 enum SenderID {SERVER, CONTROLLER, MONITOR,};
-enum SystemModes {SYS_OFF, SYS_FAN, SYS_COOL, SYS_AUTO_CL,};
 enum WiFiModeState {ESPNOW_OFFLINE, ESPNOW_ONLINE, ESPNOW_IDLE,};
 WiFiModeState espnow_connection_state = ESPNOW_IDLE;
 // MessageType espnow_msg_type;
@@ -326,7 +328,7 @@ void set_AP_for_ESPNOW_offline_mode() {
 void test_AP_for_ESPNOW_online_mode(){
   info_logger("[wifi] Setting up to communicate over esp_now while device is online.");
   WiFi.begin(esid.c_str(), epass.c_str());
-  wifi_reconnect_attempt = 0;
+  wiFiReconnectAttempt = 0;
 }
 
 
@@ -340,7 +342,7 @@ void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     case ARDUINO_EVENT_WIFI_STA_CONNECTED:       
       WiFi_channel = WiFi.channel();
       espnow_connection_state = ESPNOW_ONLINE;
-      wifi_reconnect_attempt = 0;
+      wiFiReconnectAttempt = 0;
       ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] Connected to the AP on channel: %d", WiFi_channel);
       ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] RSSI: %d", WiFi.RSSI());
       ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] SOFT AP MAC Address: %s", WiFi.softAPmacAddress().c_str());
@@ -348,16 +350,16 @@ void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
       break;
 
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
-      if (wifi_reconnect_attempt > MAX_RECONNECT_ATTEMPTS) {
-        wifi_reconnect_attempt = 0;
+      if (wiFiReconnectAttempt > MAX_RECONNECT_ATTEMPTS) {
+        wiFiReconnectAttempt = 0;
         info_logger("[wifi] reached max_reconnect_attempts.");
         set_AP_for_ESPNOW_offline_mode();
         break;
       }
-      wifi_reconnect_attempt ++;
+      wiFiReconnectAttempt ++;
       info_logger("[wifi] Disconnected from WiFi Access Point"); 
       ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] lost connection. Reason code: %d", info.wifi_sta_disconnected.reason);
-      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] Reconnect attempt # %d..", wifi_reconnect_attempt);
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] Reconnect attempt # %d..", wiFiReconnectAttempt);
       espnow_connection_state = ESPNOW_IDLE;
       WiFi.reconnect();
       break;
@@ -488,7 +490,7 @@ void save_timectrl_settings_in_fs() //[OK]
   String timectrl_setting;
   StaticJsonDocument<96> doc;
 
-  doc["value"] = sleep_control_enabled;
+  doc["value"] = sleepControlEnabled;
   if (wake_condition == WAKE_ON_TIME) {doc["on_condition"] = "on_time";} else {doc["on_condition"] = "presence";}
   if (sleep_condition == SLEEP_ON_TIME) {doc["off_condition"] = "on_time";} else {doc["off_condition"] = "presence";}
 
@@ -543,7 +545,7 @@ void load_timectrl_settings_from_fs() //[OK]
     return;
   }
 
-  sleep_control_enabled = doc1["value"];
+  sleepControlEnabled = doc1["value"];
   if (doc1["on_condition"] == "on_time") {wake_condition = WAKE_ON_TIME;} else {wake_condition == WAKE_ON_PRESENCE;}
   if (doc1["off_condition"] == "on_time") {sleep_condition == SLEEP_ON_TIME;} else {sleep_condition == SLEEP_ON_ABSENCE;}
 
@@ -859,7 +861,7 @@ void process_settings_from_broker(String json) //[OK]
     info_logger("timectrl settings adjustment.");
     // Aqui hay que guardar la configuracion del control de apagado encendido
     // Cambia el horario de encendido o apagado
-    sleep_control_enabled = doc["enabled"];          //
+    sleepControlEnabled = doc["enabled"];          //
     if (doc["on_condition"] == "on_time") {wake_condition = WAKE_ON_TIME;} else {wake_condition = WAKE_ON_PRESENCE;}
     if (doc["off_condition"] == "on_time") {sleep_condition = SLEEP_ON_TIME;} else {sleep_condition = SLEEP_ON_ABSENCE;}
     save_timectrl_settings_in_fs();
@@ -974,11 +976,11 @@ void temp_setpoint_controller() // [OK]
   switch (SysMode)
   {
   case AUTO_MODE:
-    if (MovingSensor) {
-      MovingSensorTime = millis();
+    if (radarState) { // restart the counter if the radar state is true (movement detection)
+      radarStateTime = millis();
       CurrentSysTemp = SelectTemp;
     }
-    else if (millis() - MovingSensorTime > AutoTimeOut) {
+    else if (millis() - radarStateTime > AutoTimeOut) {
       CurrentSysTemp == AutoTemp;
     }
     break;
@@ -987,8 +989,10 @@ void temp_setpoint_controller() // [OK]
     CurrentSysTemp = SelectTemp;
     break;
 
-  default:
-    CurrentSysTemp = SelectTemp;
+  case FAN_MODE:
+    CurrentSysTemp = AutoTemp;
+    break;
+
   }
 
   return;
@@ -999,7 +1003,7 @@ void sleep_state_controller() //[OK]
 {
   info_logger("Exec. sleep_state_controller");
 
-  if (!sleep_control_enabled)
+  if (!sleepControlEnabled)
   {
     info_logger("Schedule disabled.");
     sleep_flag = FLAG_DOWN;
@@ -1072,7 +1076,7 @@ void sleep_state_controller() //[OK]
       switch (wake_condition)
       {
       case WAKE_ON_PRESENCE:
-        if (MovingSensor) {
+        if (radarState) {
           sleep_flag = FLAG_DOWN;
           SysState = SYSTEM_ON;
         }
@@ -1093,7 +1097,7 @@ void sleep_state_controller() //[OK]
       switch (sleep_condition)
       {
       case SLEEP_ON_ABSENCE:
-        if(!MovingSensor){
+        if(!radarState){
           sleep_flag = FLAG_UP;
           SysState = SYSTEM_SLEEP;
         }
@@ -1134,16 +1138,17 @@ void update_ambient_temperature() // defining
 void wifiloop() //[ok]
 {
   // only wait for SmartConfig when the AP button is pressed.
-  const bool ap_btn_pressed = digitalRead(AP_BTN) ? false : true;
-  if (ap_btn_pressed)
+  const bool apBtnPressed = digitalRead(AP_BTN) ? false : true;
+  if (apBtnPressed)
   {
-    info_logger("[wifi] the AP button has been pressed, setting up new wifi network*");
+    info_logger("[wifi] the AP button has been pressed, setting up the new wifi network*");
     info_logger("[wifi] Waiting for SmartConfig...");
     WiFi.disconnect();
     WiFi.beginSmartConfig();
 
     while (!WiFi.smartConfigDone())
     {
+      info_logger("[wiFi] Waiting SmartConfig data...");
       network_led_state = (network_led_state == LOW) ? HIGH : LOW;
       digitalWrite(NETWORK_LED, network_led_state);
       delay(500); //wait for smart config to arrive.
@@ -1231,12 +1236,22 @@ void wifiloop() //[ok]
 // Atualiza estado de entradas y salidas digitales.
 void update_IO() //[ok]
 {
+  const bool currentRadarReading = digitalRead(RADAR);
+  const bool manualBtnPressed = digitalRead(MANUAL_BTN) ? false : true; // input = 0 means button pressed
+
+  if (currentRadarReading != lastRadarState) {
+    lastRadarChange = millis();
+    lastRadarState = currentRadarReading;
+  }
 
   // Lectura de sensor de movimiento.
-  MovingSensor = digitalRead(RADAR) ? true : false;
-  // Apaga o enciende el aire depediendo del estado
-  const bool btn_manual = digitalRead(MANUAL_BTN) ? false : true; // input = 0 means button pressed
-  if (btn_manual && millis() - lastButtonPress > buttonTimeOut)
+  if (millis() - lastRadarChange > radarDebounceTime) {
+    radarState = currentRadarReading;
+    // radarState has been updated after radarDebounceTime period. this prevents false presence/absence readings.
+  }
+
+  // Apaga o enciende el sistema depediendo del estado, previene cambiar el estado durante el buttonTimeOut.
+  if (manualBtnPressed && millis() - lastButtonPress > buttonTimeOut)
   {
     info_logger("Manual Button has been pressed..");
 
@@ -1308,7 +1323,7 @@ void send_data_to_broker() //[ok]
   double tdecimal = (int)(ambient_temp * 100 + 0.5) / 100.0;
 
   String timectrl;
-  timectrl = sleep_control_enabled ? "on": "off";
+  timectrl = sleepControlEnabled ? "on": "off";
   // json todas las variables, falta recoleccion
   String output;
   StaticJsonDocument<256> doc;
@@ -1362,7 +1377,7 @@ void sensors_read(void *pvParameters)
 
       // logging
       ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "System state: %s", SysState);
-      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Presence sensor: %s", MovingSensor ? "detecting": "empty room");
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Presence sensor: %s", radarState ? "detecting": "empty room");
 
       // update time var
       lastControllerTime = millis();
@@ -1424,11 +1439,11 @@ void setup()
   // Inicio Sensores OneWire
   info_logger("OneWire sensors configuration!");
   ambient_t_sensor.begin();
-  ambient_t_sensor.setResolution(ds_sensor_resolution);
+  ambient_t_sensor.setResolution(tempSensorResolution);
   ambient_t_sensor.setWaitForConversion(false);
   ambient_t_sensor.requestTemperatures();
   lastTempRequest = millis();
-  tempRequestDelay = 750 / (1 << (12 - ds_sensor_resolution));
+  tempRequestDelay = 750 / (1 << (12 - tempSensorResolution));
   info_logger("OneWire sensors ok.");
 
   // set default values from .txt files
