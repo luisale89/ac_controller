@@ -21,11 +21,11 @@ static const char* TAG = "main";
 #include <secrets.h>
 
 // LastWill MQTT
-const char willTopic[20] = "device/lastwill";
+const char willTopic[] = "achub/device/lastwill";
 const int willQoS = 0;
 const bool willRetain = false;
-const char willMessage[20] = "disconnected";
-uint16_t mqttBufferSize = 512; // LuisLucena, bufferSize in bytes
+const char willMessage[] = "disconnected";
+uint16_t mqttBufferSize = 768; // LuisLucena, bufferSize in bytes
 
 // Variables
 int network_led_state = LOW;
@@ -52,7 +52,7 @@ unsigned long lastButtonPress = 0;
 unsigned long lastWifiReconnect = 0;
 unsigned long lastMqttReconnect = 0;
 unsigned long lastNetworkLedBlink = 0;
-unsigned long postingInterval = 5L * 60000L;   // delay between updates, in milliseconds.. 5 minutes
+unsigned long postingInterval = 1L * 60000L;   // delay between updates, in milliseconds.. 1 minute and updates later on.
 unsigned long radarStateTime = 0;
 unsigned long AutoTimeOut = 0;                           // wati time for moving sensor and setpoint change
 unsigned long lastTempRequest = 0;
@@ -82,6 +82,7 @@ TaskHandle_t Task1;
 // WIFI VARIABLES
 String esid = "";
 String epass = "";
+String deviceIdentifier = "";
 const char* AP_SSID = "AC-HUB";
 const char* AP_PASS = AP_PASSWORD;
 WiFiClient espClient;
@@ -108,9 +109,9 @@ SleepWakeCondition sleep_condition = SLEEP_ON_TIME;
 SleepWakeCondition wake_condition = WAKE_ON_TIME;
 
 //--
-float SelectTemp;
-float AutoTemp;
-float CurrentSysTemp;
+float userSetpoint;
+float AutoSetpoint;
+float activeSetpoint;
 bool Salute = false;
 bool radarState = false;
 bool lastRadarState = false;
@@ -616,7 +617,7 @@ void save_auto_config_in_fs(int wait, int temp)
   f.println(output);
   f.close();
   AutoTimeOut = (unsigned long)wait * 60000L; // convert minutes to miliseconds
-  AutoTemp = temp;                            // 24
+  AutoSetpoint = temp;                            // 24
 }
 
 // Aqui se guarda el modo que llega desde el topico
@@ -706,10 +707,10 @@ void load_temp_setpoint_from_fs()
     return;
   }
   String ReadTemp = file.readString();
-  SelectTemp = ReadTemp.toFloat();
-  CurrentSysTemp = SelectTemp;
+  userSetpoint = ReadTemp.toFloat();
+  activeSetpoint = userSetpoint;
   file.close();
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "NORMAL Temp. loaded: %3.2f °C", CurrentSysTemp);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "NORMAL Temp. loaded: %3.2f °C", activeSetpoint);
 
   // Temperatura en Auto
   info_logger("loading AUTO_MODE setpoints from fs");
@@ -738,9 +739,9 @@ void load_temp_setpoint_from_fs()
 
   int wait = doc["wait"];
   AutoTimeOut = (unsigned long)wait * 60000L;
-  AutoTemp = doc["temp"]; // 24
+  AutoSetpoint = doc["temp"]; // 24
 
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Auto setpoints loaded = wait: %d min., temp: %3.2f °C", wait, AutoTemp);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Auto setpoints loaded = wait: %d min., temp: %3.2f °C", wait, AutoSetpoint);
   f.close();
 }
 
@@ -785,7 +786,7 @@ void process_temp_sp_from_broker(String json) //[OK]
     return;
   }
   f.print(value);
-  SelectTemp = value;
+  userSetpoint = value;
   f.close();
 }
 
@@ -987,25 +988,25 @@ void temp_setpoint_controller() // [OK]
       radarStateTime = millis();
     }
     if (millis() - radarStateTime > AutoTimeOut) {
-      info_logger("system Temp. adjust = 'AutoTemp'");
-      CurrentSysTemp = AutoTemp;
+      info_logger("system Temp. adjust = 'AutoSetpoint'");
+      activeSetpoint = AutoSetpoint;
     } else {
-      CurrentSysTemp = SelectTemp;
+      activeSetpoint = userSetpoint;
     }
     break;
 
   case COOL_MODE:
-    CurrentSysTemp = SelectTemp;
+    activeSetpoint = userSetpoint;
     info_logger("system Temp. adjust = 'UserTemp'");
     break;
 
   case FAN_MODE:
-    CurrentSysTemp = SelectTemp;
+    activeSetpoint = userSetpoint;
     info_logger("system Temp. adjust = 'UserTemp'");
     break;
 
   }
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "System Temp. value: %2.1f", CurrentSysTemp);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "System Temp. value: %2.1f", activeSetpoint);
 }
 
 // Funcion que recibe la data de Tago por MQTT
@@ -1336,27 +1337,18 @@ void notify_state_update_to_broker()
     return;
   }
 
+  String message;
+  JsonDocument doc;
+  doc["variable"] = "ac-hub";
+  doc["value"] = "stateNotification";
+  doc["metadata"]["systemPrevState"] = PrevSysState;
+  doc["metadata"]["systemNewState"] = SysState;
+  doc["metadata"]["deviceID"] = deviceIdentifier;
+  serializeJson(doc, message);
+
   PrevSysState = SysState; // assign PrevSysState the current SysState
   save_operation_state_in_fs();
 
-  String sysState_buffer = "off";
-  switch (SysState)
-  {
-  case SYSTEM_ON:
-    sysState_buffer = "on";
-    break;
-  
-  case SYSTEM_SLEEP:
-    sysState_buffer = "sleep";
-    break;
-  }
-
-  String pass = mqtt_password;
-  String message = sysState_buffer;
-  message += ",";
-  message += pass;
-  message += ",";
-  message += PrevSysState;
   info_logger("Notifying MQTT broker on System State update..");
   // sending message.
   bool message_sent = mqtt_client.publish("achub/device/stateNotification", message.c_str());
@@ -1373,26 +1365,22 @@ void send_data_to_broker() //[ok]
   }
 
   double tdecimal = (int)(ambient_temp * 100 + 0.5) / 100.0;
-
-  String timectrl;
-  timectrl = sleepControlEnabled ? "on": "off";
   // json todas las variables, falta recoleccion
   String output;
   JsonDocument doc;
 
-  doc["variable"] = "ac_control";
+  doc["variable"] = "ac-hub";
   doc["value"] = tdecimal;
-
-  doc["metadata"]["user_setpoint"] = SelectTemp;
-  doc["metadata"]["active_setpoint"] = CurrentSysTemp;
-  doc["metadata"]["sys_state"] = SysState;
-  doc["metadata"]["sys_mode"] = SysMode;
-  doc["metadata"]["presence"] = digitalRead(RADAR);
-  doc["metadata"]["timectrl"] = timectrl;
+  doc["metadata"]["deviceID"] = deviceIdentifier;
+  doc["metadata"]["hub"][0] = SysState;
+  doc["metadata"]["hub"][1] = SysMode;
+  doc["metadata"]["hub"][2] = radarState;
+  doc["metadata"]["hub"][3] = sleepControlEnabled;
+  doc["metadata"]["hub"][4] = userSetpoint;
+  doc["metadata"]["hub"][5] = activeSetpoint;
 
   serializeJson(doc, output);
   info_logger("Publishing system variables to mqtt broker.");
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Message: %s", output.c_str());
   bool mqtt_msg_sent = mqtt_client.publish("achub/tago/data/post", output.c_str());
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "MQTT publish result: %s", mqtt_msg_sent ? "message sent!" : "fail");
 
@@ -1543,6 +1531,7 @@ void setup()
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(AP_SSID, AP_PASS, 1, 1); //channel 1, hidden ssid
   WiFi.begin(esid.c_str(), epass.c_str());
+  deviceIdentifier = WiFi.softAPmacAddress().c_str();
   info_logger("WiFi settings ok.");
   //---------------------------------------- esp_now settings
   info_logger("Setting up ESP_NOW");
