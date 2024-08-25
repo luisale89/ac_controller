@@ -7,7 +7,6 @@ static const char* TAG = "main";
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <SPI.h>
-#include <ArduinoJson.hpp>
 #include <ArduinoJson.h>
 // Libreria RTC
 #include "RTClib.h"
@@ -256,7 +255,7 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len)
     info_logger("[esp-now] Waiting to finish AP connection. Ignoring Data..");
     return;
   }
-  StaticJsonDocument<512> root;
+  JsonDocument root;
   String payload;
   uint8_t type = incomingData[0];       // first message byte is the type of message 
   uint8_t sender_id = incomingData[1];  // second message byte is the sender_id.
@@ -490,7 +489,7 @@ void save_timectrl_settings_in_fs() //[OK]
 {
   info_logger("[spiffs] saving timectrl settings in file system.");
   String timectrl_setting;
-  StaticJsonDocument<96> doc;
+  JsonDocument doc;
 
   doc["value"] = sleepControlEnabled;
   if (wake_condition == WAKE_ON_TIME) {doc["on_condition"] = "on_time";} else {doc["on_condition"] = "presence";}
@@ -538,7 +537,7 @@ void load_timectrl_settings_from_fs() //[OK]
   String Settings = f.readString();
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "data loaded from file: %s", Settings.c_str());
   // String input;
-  StaticJsonDocument<128> doc1;
+  JsonDocument doc1;
   DeserializationError error = deserializeJson(doc1, Settings);
 
   if (error)
@@ -562,7 +561,7 @@ void load_timectrl_settings_from_fs() //[OK]
 void save_schedule_in_fs(int HON, int HOFF, String Day, bool enable) //[OK]
 {
   String Hours;
-  StaticJsonDocument<96> doc;
+  JsonDocument doc;
 
   doc["ON"] = HON;
   doc["OFF"] = HOFF;
@@ -591,7 +590,7 @@ void save_schedule_in_fs(int HON, int HOFF, String Day, bool enable) //[OK]
 void save_auto_config_in_fs(int wait, int temp)
 {
   info_logger("[spiffs] saving auto-mode settings in file system.");
-  StaticJsonDocument<32> doc;
+  JsonDocument doc;
   String output;
 
   doc["wait"] = wait;
@@ -728,7 +727,7 @@ void load_temp_setpoint_from_fs()
     return;
   }
   String AutoSetUp = f.readString();
-  StaticJsonDocument<64> doc;
+  JsonDocument doc;
   DeserializationError error = deserializeJson(doc, AutoSetUp);
 
   if (error)
@@ -748,7 +747,7 @@ void load_temp_setpoint_from_fs()
 // Guarda el Setpoint en SPIFF
 void process_temp_sp_from_broker(String json) //[OK]
 {
-  StaticJsonDocument<96> doc;
+  JsonDocument doc;
   DeserializationError error = deserializeJson(doc, json);
 
   if (error)
@@ -757,8 +756,8 @@ void process_temp_sp_from_broker(String json) //[OK]
     return;
   }
 
-  const char *variable = doc["variable"]; // "user_setpoint"
-  int value = doc["value"];          // 24
+  const char *variable = doc["variable"] | "null"; // "user_setpoint"
+  const int value = doc["value"] | 0;                    // 24
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Temp. sp received: %d °C", value);
 
   if (strcmp(variable, "user_setpoint") != 0) {
@@ -811,7 +810,7 @@ void load_wifi_data_from_fs()
   String wifi_data = f.readString();
   // String input;
 
-  StaticJsonDocument<256> doc1;
+  JsonDocument doc1;
   DeserializationError error = deserializeJson(doc1, wifi_data);
 
   if (error)
@@ -832,7 +831,7 @@ void load_wifi_data_from_fs()
 void save_wifi_data_in_fs()
 {
   info_logger("[spiffs] Saving WiFi data in fs");
-  StaticJsonDocument<256> doc;
+  JsonDocument doc;
   String output;
 
   doc["ssid"] = WiFi.SSID();
@@ -862,7 +861,7 @@ void save_wifi_data_in_fs()
 // Guarda la configuracion que se envia en el topico
 void process_settings_from_broker(String json) //[OK]
 {
-  StaticJsonDocument<768> doc;
+  JsonDocument doc;
   DeserializationError error = deserializeJson(doc, json);
 
   if (error)
@@ -871,18 +870,21 @@ void process_settings_from_broker(String json) //[OK]
     return;
   }
 
-  const char *variable = doc["variable"];
+  const char *variable = doc["variable"] | "null";
 
   if (strcmp(variable, "timectrl") == 0)
   {
     info_logger("timectrl settings adjustment.");
     // Aqui hay que guardar la configuracion del control de apagado encendido
     // Cambia el horario de encendido o apagado
-    sleepControlEnabled = doc["enabled"];          //
-    if (strcmp(doc["on_condition"], "on_time") == 0) {
+    sleepControlEnabled = doc["enabled"];
+    const char *on_condition = doc["on_condition"];
+    const char *off_condition = doc["off_condition"];
+
+    if (strcmp(on_condition, "on_time") == 0) {
       wake_condition = WAKE_ON_TIME;} else {wake_condition = WAKE_ON_PRESENCE;
     }
-    if (strcmp(doc["off_condition"], "on_time") == 0) {
+    if (strcmp(off_condition, "on_time") == 0) {
       sleep_condition = SLEEP_ON_TIME;} else {sleep_condition = SLEEP_ON_ABSENCE;
     }
     save_timectrl_settings_in_fs();
@@ -906,15 +908,15 @@ void process_settings_from_broker(String json) //[OK]
     info_logger("auto mode configuration settings.");
     // Cambia la configuracion del modo
     const char *value = doc["value"]; // "auto"
-    int wait = doc["wait"];           // 1234
-    int temp = doc["temp"];           // 24
+    const int wait = doc["wait"] | 0;           // 1234
+    const int temp = doc["temp"] | 0;           // 24
 
     if (strcmp(value, "auto") != 0) {
       error_logger("invalid value in json, expected: 'auto'");
       return;
     } 
 
-    if (wait < 0 || wait > 60) {
+    if (wait <= 0 || wait > 60) {
       error_logger("invalid range for wait value");
       return;
     }
@@ -932,6 +934,7 @@ void process_settings_from_broker(String json) //[OK]
     info_logger("system operation mode settings");
     // Cambia el modo de operacion
     const char *value = doc["value"]; // "cool"
+
     if (strcmp(value, "cool") == 0) {SysMode = COOL_MODE;}
     else if (strcmp(value, "fan") == 0) {SysMode = FAN_MODE;}
     else if (strcmp(value, "auto") == 0) {SysMode = AUTO_MODE;}
@@ -940,13 +943,18 @@ void process_settings_from_broker(String json) //[OK]
     // save in filesystem.
     save_operation_mode_in_fs();
   }
+
+  else
+  {
+    error_logger("Invalid variable value in json document");
+  }
 }
 
 // Lee la variable de encendio o apadado de tago
 void process_op_state_from_broker(String json) //[OK, OK]
 {
   // String input;
-  StaticJsonDocument<96> doc;
+  JsonDocument doc;
   DeserializationError error = deserializeJson(doc, json);
   if (error)
   {
@@ -1077,7 +1085,7 @@ void sleep_state_controller() //[OK]
   String AutoOff = file.readString();
   file.close();
 
-  StaticJsonDocument<64> doc;
+  JsonDocument doc;
   DeserializationError error = deserializeJson(doc, AutoOff);
 
   if (error)
@@ -1086,9 +1094,9 @@ void sleep_state_controller() //[OK]
     return;
   }
 
-  int WAKE_TIME = doc["ON"];   // "0730"
-  int SLEEP_TIME = doc["OFF"]; // "2130"
-  bool SLEEP_ENABLED = doc["enable"];
+  const int WAKE_TIME = doc["ON"];   // "0730"
+  const int SLEEP_TIME = doc["OFF"]; // "2130"
+  const bool SLEEP_ENABLED = doc["enable"];
   
   if (!SLEEP_ENABLED)
   {
@@ -1370,18 +1378,17 @@ void send_data_to_broker() //[ok]
   timectrl = sleepControlEnabled ? "on": "off";
   // json todas las variables, falta recoleccion
   String output;
-  StaticJsonDocument<256> doc;
+  JsonDocument doc;
 
   doc["variable"] = "ac_control";
   doc["value"] = tdecimal;
 
-  JsonObject metadata = doc.createNestedObject("metadata");
-  metadata["user_setpoint"] = SelectTemp;
-  metadata["active_setpoint"] = CurrentSysTemp;
-  metadata["sys_state"] = SysState;
-  metadata["sys_mode"] = SysMode;
-  metadata["presence"] = digitalRead(RADAR);
-  metadata["timectrl"] = timectrl;
+  doc["metadata"]["user_setpoint"] = SelectTemp;
+  doc["metadata"]["active_setpoint"] = CurrentSysTemp;
+  doc["metadata"]["sys_state"] = SysState;
+  doc["metadata"]["sys_mode"] = SysMode;
+  doc["metadata"]["presence"] = digitalRead(RADAR);
+  doc["metadata"]["timectrl"] = timectrl;
 
   serializeJson(doc, output);
   info_logger("Publishing system variables to mqtt broker.");
