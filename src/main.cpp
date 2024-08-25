@@ -58,7 +58,7 @@ unsigned long radarStateTime = 0;
 unsigned long AutoTimeOut = 0;                           // wati time for moving sensor and setpoint change
 unsigned long lastTempRequest = 0;
 unsigned long lastRadarChange = 0;
-const unsigned long radarDebounceTime = 5L * 60000L;      // 5 minutes rebound for radar sensor.
+const unsigned long radarDebounceTime = 1L * 60000L;      // 1 minute rebound for radar sensor.
 const unsigned long buttonTimeOut = 5L * 1000L;          // rebound 5seconds
 const unsigned long controllerInterval = 2L * 5000L;     // delay between sensor updates, 10 seconds
 const unsigned long SaluteTimer = 1L * 30000L;           // Tiempo para enviar que el dispositivo esta conectado,
@@ -67,10 +67,11 @@ const unsigned long mqttReconnectInterval = 1L * 10000L; // 10 segundos para int
 const unsigned long wifiDisconnectedLedInterval = 250;        // 250 ms
 
 // MQTT Broker
-const char *mqtt_broker = "mqtt.tago.io";
-const char *topic = "system/operation/settings";
-const char *topic_2 = "system/operation/state";
-const char *topic_3 = "system/operation/setpoint";
+// const char *mqtt_broker = "mqtt.tago.io";
+const char *mqtt_broker = "broker.emqx.io";
+const char *settings_topic = "achub/system/operation/settings";
+const char *opstate_topic = "achub/system/operation/state";
+const char *opsetpoint_topic = "achub/system/operation/setpoint";
 const char *mqtt_username = "Token";
 const char *mqtt_password = MQTT_PASSWORD;
 const int mqtt_port = 1883;
@@ -96,12 +97,12 @@ char Week_days[7][12] = {"Domingo", "Lunes", "Martes", "Miercoles", "Jueves", "V
 // Variables de configuracion
 // Enum classes
 enum SysModeEnum {AUTO_MODE, FAN_MODE, COOL_MODE};
-enum SysStateEnum {SYSTEM_ON, SYSTEM_OFF, SYSTEM_SLEEP};
+enum SysStateEnum {SYSTEM_ON, SYSTEM_OFF, SYSTEM_SLEEP, UNKN};
 enum FlowFlag {FLAG_UP, FLAG_DOWN, FLAG_UNSET};
 enum SleepWakeCondition {SLEEP_ON_TIME, SLEEP_ON_ABSENCE, WAKE_ON_TIME, WAKE_ON_PRESENCE};
 // Enum vars
-SysStateEnum SysState = SYSTEM_OFF;
-SysStateEnum PrevSysState = SYSTEM_OFF;
+SysStateEnum SysState = UNKN;
+SysStateEnum PrevSysState = UNKN;
 SysModeEnum SysMode = AUTO_MODE;
 FlowFlag sleep_flag = FLAG_UNSET;
 SleepWakeCondition sleep_condition = SLEEP_ON_TIME;
@@ -116,7 +117,7 @@ bool radarState = false;
 bool lastRadarState = false;
 bool sleepControlEnabled; // Variables de activacion del modo sleep
 double ambient_temp = 22;
-int tempSensorResolution = 10; //bits
+int tempSensorResolution = 12; //bits
 int tempRequestDelay = 0;
 
 // NTP
@@ -449,6 +450,7 @@ void load_operation_state_from_fs() //[OK] [OK]
   else if (ESave == "sleep") {SysState = SYSTEM_SLEEP;}
   else {error_logger("Error: Bad value stored in Encendido.txt");}
 
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "operation state loaded: %s", ESave);
   return;
 }
 
@@ -546,8 +548,12 @@ void load_timectrl_settings_from_fs() //[OK]
   }
 
   sleepControlEnabled = doc1["value"];
-  if (doc1["on_condition"] == "on_time") {wake_condition = WAKE_ON_TIME;} else {wake_condition == WAKE_ON_PRESENCE;}
-  if (doc1["off_condition"] == "on_time") {sleep_condition == SLEEP_ON_TIME;} else {sleep_condition == SLEEP_ON_ABSENCE;}
+  if (strcmp(doc1["on_condition"], "on_time") == 0) {
+    wake_condition = WAKE_ON_TIME;} else {wake_condition = WAKE_ON_PRESENCE;
+  }
+  if (strcmp(doc1["off_condition"], "on_time") == 0) {
+    sleep_condition = SLEEP_ON_TIME;} else {sleep_condition = SLEEP_ON_ABSENCE;
+  }
 
   f.close();
 }
@@ -671,11 +677,12 @@ void load_operation_mode_from_fs() //[OK]
     return;
   }
   String ReadModo = file.readString();
-  if (ReadModo == "auto") {SysMode == AUTO_MODE;}
-  else if (ReadModo == "fan") {SysMode == FAN_MODE;}
-  else if (ReadModo == "cool") {SysMode == COOL_MODE;}
+  if (ReadModo == "auto") {SysMode = AUTO_MODE;}
+  else if (ReadModo == "fan") {SysMode = FAN_MODE;}
+  else if (ReadModo == "cool") {SysMode = COOL_MODE;}
 
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "operation mode loaded: %s Enum %s", ReadModo, SysMode);
+
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "operation mode loaded: %s", ReadModo);
 
   file.close();
 }
@@ -750,9 +757,19 @@ void process_temp_sp_from_broker(String json) //[OK]
     return;
   }
 
-  String variable = doc["variable"]; // "user_setpoint"
+  const char *variable = doc["variable"]; // "user_setpoint"
   int value = doc["value"];          // 24
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Temp. sp received: %d °C", value);
+
+  if (strcmp(variable, "user_setpoint") != 0) {
+    error_logger("Invalid json variable, expected: 'user_setpoint'");
+    return;
+  }
+
+  if (value < 16 || value > 28) {
+    error_logger("Invalid temperature range for 'user_setpoint' variable");
+    return;
+  }
 
   if (!SPIFFS.begin(true))
   {
@@ -854,16 +871,20 @@ void process_settings_from_broker(String json) //[OK]
     return;
   }
 
-  const char *variable = doc["variable"]; // "timectrl"
+  const char *variable = doc["variable"];
 
-  if (variable == "timectrl")
+  if (strcmp(variable, "timectrl") == 0)
   {
     info_logger("timectrl settings adjustment.");
     // Aqui hay que guardar la configuracion del control de apagado encendido
     // Cambia el horario de encendido o apagado
     sleepControlEnabled = doc["enabled"];          //
-    if (doc["on_condition"] == "on_time") {wake_condition = WAKE_ON_TIME;} else {wake_condition = WAKE_ON_PRESENCE;}
-    if (doc["off_condition"] == "on_time") {sleep_condition = SLEEP_ON_TIME;} else {sleep_condition = SLEEP_ON_ABSENCE;}
+    if (strcmp(doc["on_condition"], "on_time") == 0) {
+      wake_condition = WAKE_ON_TIME;} else {wake_condition = WAKE_ON_PRESENCE;
+    }
+    if (strcmp(doc["off_condition"], "on_time") == 0) {
+      sleep_condition = SLEEP_ON_TIME;} else {sleep_condition = SLEEP_ON_ABSENCE;
+    }
     save_timectrl_settings_in_fs();
 
     for (JsonPair schedule_item : doc["schedule"].as<JsonObject>())
@@ -879,23 +900,44 @@ void process_settings_from_broker(String json) //[OK]
       save_schedule_in_fs(schedule_item_value_on, schedule_item_value_off, Day, schedule_item_value_enabled);
     }
   }
-  else if (variable == "mode_config")
+
+  else if (strcmp(variable, "mode_config") == 0)
   {
     info_logger("auto mode configuration settings.");
     // Cambia la configuracion del modo
     const char *value = doc["value"]; // "auto"
     int wait = doc["wait"];           // 1234
     int temp = doc["temp"];           // 24
+
+    if (strcmp(value, "auto") != 0) {
+      error_logger("invalid value in json, expected: 'auto'");
+      return;
+    } 
+
+    if (wait < 0 || wait > 60) {
+      error_logger("invalid range for wait value");
+      return;
+    }
+
+    if (temp < 16 || temp > 28) {
+      error_logger("invalid range for temp value");
+      return;
+    }
+
     save_auto_config_in_fs(wait, temp);
   }
-  else if (variable == "system_mode")
+
+  else if (strcmp(variable, "system_mode") == 0)
   {
     info_logger("system operation mode settings");
     // Cambia el modo de operacion
     const char *value = doc["value"]; // "cool"
-    if (value == "cool") {SysMode = COOL_MODE;}
-    if (value == "fan") {SysMode = FAN_MODE;}
-    if (value == "auto") {SysMode = AUTO_MODE;} 
+    if (strcmp(value, "cool") == 0) {SysMode = COOL_MODE;}
+    else if (strcmp(value, "fan") == 0) {SysMode = FAN_MODE;}
+    else if (strcmp(value, "auto") == 0) {SysMode = AUTO_MODE;}
+    else {error_logger("Invalid value mode in json");}
+    
+    // save in filesystem.
     save_operation_mode_in_fs();
   }
 }
@@ -911,28 +953,60 @@ void process_op_state_from_broker(String json) //[OK, OK]
     ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
     return;
   }
-  String variable = doc["variable"]; // "system_state"
-  String value = doc["value"];       // "on"
-  
-  if (value == "on") {SysState = SYSTEM_ON;}
-  else if (value == "off") {SysState = SYSTEM_OFF;}
-  else {
-    error_logger("Error: invalid value received from broker on -system_state-");
-    return;
+  const char *variable = doc["variable"]; // "system_state"
+  const char *value = doc["value"];
+
+  if (strcmp(variable, "system_state") != 0) {
+    error_logger("Error: Invalid variable name, 'system_state' expected.");
   }
+  
+  if (strcmp(value,"on") == 0) {SysState = SYSTEM_ON;}
+  else if (strcmp(value, "off") == 0) {SysState = SYSTEM_OFF;}
+  else {error_logger("Error: invalid value received from broker on -system_state-");}
   return;
 }
 
 //-- Operation functions --
 
-// Funcion que recibe la data de Tago por MQTT
-void mqtt_message_callback(char *topicp, byte *payload, unsigned int length) //[OK]
+// Funcion que regula la temperatura
+void temp_setpoint_controller() // [OK]
 {
-  String topic = String(topicp);
+  info_logger("* Exec. temp setpoint controller function");
+  switch (SysMode)
+  {
+  case AUTO_MODE:
+    if (radarState) { // restart the counter if the radar state is true (movement detection)
+      radarStateTime = millis();
+    }
+    if (millis() - radarStateTime > AutoTimeOut) {
+      info_logger("system Temp. adjust = 'AutoTemp'");
+      CurrentSysTemp = AutoTemp;
+    } else {
+      CurrentSysTemp = SelectTemp;
+    }
+    break;
+
+  case COOL_MODE:
+    CurrentSysTemp = SelectTemp;
+    info_logger("system Temp. adjust = 'UserTemp'");
+    break;
+
+  case FAN_MODE:
+    CurrentSysTemp = SelectTemp;
+    info_logger("system Temp. adjust = 'UserTemp'");
+    break;
+
+  }
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "System Temp. value: %2.1f", CurrentSysTemp);
+}
+
+// Funcion que recibe la data de Tago por MQTT
+void mqtt_message_callback(char *message_topic, byte *payload, unsigned int length) //[OK]
+{
   String Mensaje;
   //begin.
   digitalWrite(NETWORK_LED, LOW);
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "$ MQTT Message arrived on topic: %s", topic.c_str());
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "$ MQTT Message arrived on topic: %s", message_topic);
   for (int i = 0; i < length; i++)
   {
     Mensaje = Mensaje + (char)payload[i];
@@ -941,23 +1015,25 @@ void mqtt_message_callback(char *topicp, byte *payload, unsigned int length) //[
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "+ Message: %s", Mensaje.c_str());
 
   // Selecciona la funcion acorde al topico al cual llego el mensaje
-  if (topic == "system/operation/settings")
+  if (strcmp(message_topic, settings_topic) == 0)
   {
     // Cambia la configuracion del sistema
     info_logger("processing settings received from broker");
     process_settings_from_broker(Mensaje);
   }
-  else if (topic == "system/operation/state")
+  else if (strcmp(message_topic, opstate_topic) == 0)
   {
     // Apaga o enciende el sistema
     info_logger("processing operation state received from broker");
     process_op_state_from_broker(Mensaje);
   }
-  else if (topic == "system/operation/setpoint")
+  else if (strcmp(message_topic, opsetpoint_topic) == 0)
   {
     // Ajusta la temperatura del ambiente
     info_logger("processing temp. setpoint received from broker");
     process_temp_sp_from_broker(Mensaje);
+    //update system temp setpoint.
+    temp_setpoint_controller();
   }
   else {
     error_logger("mqtt topic not implemented.");
@@ -969,43 +1045,13 @@ void mqtt_message_callback(char *topicp, byte *payload, unsigned int length) //[
   digitalWrite(NETWORK_LED, HIGH);
 }
 
-// Funcion que regula la temperatura
-void temp_setpoint_controller() // [OK]
-{
-  info_logger("Exec. temp_setpoint_controller");
-  switch (SysMode)
-  {
-  case AUTO_MODE:
-    if (radarState) { // restart the counter if the radar state is true (movement detection)
-      radarStateTime = millis();
-      CurrentSysTemp = SelectTemp;
-    }
-    else if (millis() - radarStateTime > AutoTimeOut) {
-      CurrentSysTemp == AutoTemp;
-    }
-    break;
-
-  case COOL_MODE:
-    CurrentSysTemp = SelectTemp;
-    break;
-
-  case FAN_MODE:
-    CurrentSysTemp = AutoTemp;
-    break;
-
-  }
-
-  return;
-}
-
 //funcion que ajusta el estado del sistema en funcion del horario y otros parametros.
 void sleep_state_controller() //[OK]
 {
-  info_logger("Exec. sleep_state_controller");
-
+  info_logger("* Excec. sleep state controller function.");
   if (!sleepControlEnabled)
   {
-    info_logger("Schedule disabled.");
+    info_logger("- Schedule disabled.");
     sleep_flag = FLAG_DOWN;
     return;
   }
@@ -1118,7 +1164,6 @@ void update_ambient_temperature() // defining
 {
   if (millis() - lastTempRequest >= tempRequestDelay) {
     //-
-    info_logger("reading temperature from DS18B20...");
     double AmbTempBuffer = ambient_t_sensor.getTempCByIndex(0);
     ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Ambient temperature: %3.2f °C", AmbTempBuffer);
     if (AmbTempBuffer == -127)
@@ -1181,7 +1226,7 @@ void wifiloop() //[ok]
       // connecting to a mqtt broker
       info_logger("[mqtt] MQTT broker connection attempt..");
       lastMqttReconnect = millis();
-      String client_id = "esp32-mqtt_client-";
+      String client_id = "ac-hub-";
       client_id += String(WiFi.macAddress());
       ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[mqtt] client id: %s", client_id.c_str());
       digitalWrite(NETWORK_LED, HIGH); //led pulse begin...
@@ -1191,11 +1236,11 @@ void wifiloop() //[ok]
         info_logger("[mqtt] Connected to MQTT broker!");
         // Publish and subscribe
         info_logger("[mqtt] Subscribing to mqtt topics:");
-        mqtt_client.subscribe(topic);
+        mqtt_client.subscribe(settings_topic);
         info_logger("[mqtt] Topic 1 ok");
-        mqtt_client.subscribe(topic_2);
+        mqtt_client.subscribe(opstate_topic);
         info_logger("[mqtt] Topic 2 ok");
-        mqtt_client.subscribe(topic_3);
+        mqtt_client.subscribe(opsetpoint_topic);
         info_logger("[mqtt] Topic 3 ok");
         lastSaluteTime = millis();
         Salute = false; // flag to send connection message.
@@ -1204,14 +1249,13 @@ void wifiloop() //[ok]
       else
       {
         ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[mqtt] Fail MQTT Connection with state: %d", mqtt_client.state());
-        digitalWrite(NETWORK_LED, LOW); // led pulse end...
         return;
       }
     }
 
     if (!Salute && millis() - lastSaluteTime > SaluteTimer)
     {
-      mqtt_client.publish("device/hello", "connected");
+      mqtt_client.publish("achub/device/hello", "connected");
       Salute = true;
       info_logger("[mqtt] 'Salute' message sent");
     }
@@ -1279,7 +1323,7 @@ void update_IO() //[ok]
 //notifica al broker el cambio de estado del sistema.
 void notify_state_update_to_broker()
 {
-  if (PrevSysState == SysState)
+  if (PrevSysState == SysState || !mqtt_client.connected())
   {
     return;
   }
@@ -1307,7 +1351,7 @@ void notify_state_update_to_broker()
   message += PrevSysState;
   info_logger("Notifying MQTT broker on System State update..");
   // sending message.
-  bool message_sent = mqtt_client.publish("device/stateNotification", message.c_str());
+  bool message_sent = mqtt_client.publish("achub/device/stateNotification", message.c_str());
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "MQTT publish result: %s", message_sent ? "message sent!" : "fail");
   return;
 }
@@ -1342,7 +1386,7 @@ void send_data_to_broker() //[ok]
   serializeJson(doc, output);
   info_logger("Publishing system variables to mqtt broker.");
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Message: %s", output.c_str());
-  bool mqtt_msg_sent = mqtt_client.publish("tago/data/post", output.c_str());
+  bool mqtt_msg_sent = mqtt_client.publish("achub/tago/data/post", output.c_str());
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "MQTT publish result: %s", mqtt_msg_sent ? "message sent!" : "fail");
 
   //update posting interval value
@@ -1370,14 +1414,44 @@ void sensors_read(void *pvParameters)
   { 
     if (millis() - lastControllerTime > controllerInterval)
     {
+      //lee temperatura ambiente
+      update_ambient_temperature();
       // Funcion que controla el apagado y encendido automatico (Sleep)
       sleep_state_controller();
       // Funcion que regula latemperatura segun el modo (Cool, auto, fan)
       temp_setpoint_controller();
 
       // logging
-      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "System state: %s", SysState);
-      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Presence sensor: %s", radarState ? "detecting": "empty room");
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Radar State: %s", radarState ? "Detecting": "Empty room");
+      switch (SysState)
+      {
+      case SYSTEM_ON:
+        info_logger("System State: RUNNING");
+        break;
+      
+      case SYSTEM_OFF:
+        info_logger("System State: OFF");
+        break;
+
+      case SYSTEM_SLEEP:
+        info_logger("System State: SLEEP");
+        break;
+      }
+      // SysMode feedback.
+      switch (SysMode)
+      {
+      case AUTO_MODE:
+        info_logger("System Mode: AUTO");
+        break;
+
+      case COOL_MODE:
+        info_logger("System Mode: COOL");
+        break;
+
+      case FAN_MODE:
+        info_logger("System Mode: FAN");
+        break;
+      }
 
       // update time var
       lastControllerTime = millis();
@@ -1389,8 +1463,6 @@ void sensors_read(void *pvParameters)
       Envio = true;
     }
 
-    //lee temperatura ambiente
-    update_ambient_temperature();
     // Update inputs and outputs
     update_IO();
     //notify the user about state update...
