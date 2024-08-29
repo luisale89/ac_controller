@@ -66,11 +66,11 @@ const unsigned long mqttReconnectInterval = 1L * 10000L; // 10 segundos para int
 const unsigned long wifiDisconnectedLedInterval = 250;        // 250 ms
 
 // MQTT Broker
-// const char *mqtt_broker = "mqtt.tago.io";
-const char *mqtt_broker = "broker.emqx.io";
+const char *mqtt_broker = TEST_MQTT_BROKER;
 const char *settings_topic = "achub/system/operation/settings";
 const char *opstate_topic = "achub/system/operation/state";
 const char *opsetpoint_topic = "achub/system/operation/setpoint";
+const char *espnow_peer_topic = "achub/system/espnow/peer";
 const char *mqtt_username = "Token";
 const char *mqtt_password = MQTT_PASSWORD;
 const int mqtt_port = 1883;
@@ -88,7 +88,7 @@ const char* AP_PASS = AP_PASSWORD;
 WiFiClient espClient;
 PubSubClient mqtt_client(espClient);
 int wiFiReconnectAttempt = 0;
-const int MAX_RECONNECT_ATTEMPTS = 33; // three times on every channel.
+const int MAX_RECONNECT_ATTEMPTS = 33;
 
 // RTC
 RTC_DS3231 DS3231_RTC;
@@ -126,63 +126,64 @@ const long gmtOffset_sec = -4 * 3600;
 const int daylightOffset_sec = 0;
 
 // ESP-NOW VARS
-esp_now_peer_info_t slave;
+esp_now_peer_info_t slaveTemplate;
 int32_t WiFi_channel = 1;
-
-enum MessageType {PAIRING, DATA,};
-enum SenderID {SERVER, CONTROLLER, MONITOR,};
-enum WiFiModeState {ESPNOW_OFFLINE, ESPNOW_ONLINE, ESPNOW_IDLE,};
-WiFiModeState espnow_connection_state = ESPNOW_IDLE;
-// MessageType espnow_msg_type;
+char controller_mac_address[] = "00:00:00:00:00:00";
+char monitor_01_mac_address[] = "00:00:00:00:00:00";
+char monitor_02_mac_address[] = "00:00:00:00:00:00";
+enum MessageTypeEnum {PAIRING, DATA,};
+enum PeerIDEnum {SERVER, CONTROLLER, MONITOR_A, MONITOR_B};
+enum EspNowState {ESPNOW_OFFLINE, ESPNOW_ONLINE, ESPNOW_IDLE,};
+EspNowState espnow_connection_state = ESPNOW_IDLE;
+// MessageTypeEnum espnow_msg_type;
 // SystemModes espnow_system_mode;
-// SenderID espnow_peer_id;
-
+// PeerIDEnum espnow_peer_id;
 typedef struct pairing_data_struct {
-  uint8_t msg_type;             // (1 byte)
-  uint8_t sender_id;            // (1 byte)
+  MessageTypeEnum msg_type;             // (1 byte)
+  PeerIDEnum sender_id;       // (1 byte)
   uint8_t macAddr[6];           // (6 bytes)
   uint8_t channel;              // (1 byte)
 } pairing_data_struct;          // TOTAL = 9 bytes
 
 typedef struct controller_data_struct {
-  uint8_t msg_type;             // (1 byte)
-  uint8_t sender_id;            // (1 byte)
-  uint8_t active_system_mode;   // (1 byte)
-  uint8_t fault_code;           // (1 byte) 0-no_fault; 1..255 controller_fault_codes.
-  float evap_satura_temp;       // (4 bytes)
-  float evap_air_in_temp;       // (4 bytes)
-  float evap_air_out_temp;      // (4 bytes)
-} controller_data_struct;       // TOTAL = 21 bytes
+  MessageTypeEnum msg_type;    // (1 byte)
+  PeerIDEnum sender_id;       // (1 byte)
+  uint8_t fault_code;      // (1 byte)
+  float air_return_temp;   // (4 bytes) [°C]
+  float air_inyect_temp;   // (4 bytes) [°C]
+  bool drain_switch;       // (1 byte)
+  bool cooling_relay;      // (1 byte)
+  bool turbine_relay;      // (1 byte)
+} controller_data_struct;  // TOTAL = 14 bytes
 
 typedef struct monitor_data_struct {
-  uint8_t msg_type;             // (1 byte)
-  uint8_t sender_id;            // (1 byte)
-  uint8_t fault_code;           // (1 byte)   0-no_fault; 1..255 monitor_fault_codes.
-  float vapor_temp;             // (4 bytes)
-  float vapor_press[3];         // (12 bytes) min - avg - max | pressure readings
-  float liquid_temp;            // (4 bytes)
-  float liquid_press[3];        // (12 bytes) min - avg - max | pressure readings
-  float discharge_temp;         // (4 bytes)
-  float ambient_temp;           // (4 bytes)
-  float compressor_amp[3];      // (12 bytes)  min - avg - max | compressor_current readings
-  uint8_t compressor_state;     // (1 byte)   255-compressor_on; 0-compressor_off;
-} monitor_data_struct;          // TOTAL = 56 bytes
-
+  MessageTypeEnum msg_type;     // (1 byte)
+  PeerIDEnum sender_id;       // (1 byte)
+  uint8_t fault_code;           // (1 byte) 0-no_fault; 1..255 monitor_fault_codes.
+  float vapor_temp;             // (4 bytes) vapor line temperature readings [°C]
+  float low_pressure[3];        // (12 bytes) min - avg - max | low pressure readings [psi]
+  float discharge_temp;         // (4 bytes) discharge temperature readings [°C]
+  float condenser_temp;         // (4 bytes) condenser saturated temp readings [°C]
+  float liquid_temp;            // (4 bytes) liquid line temperature readings [°C]
+  float compressor_amps[3];     // (12 bytes) min - avg - max | compressor_current readings [A]
+  bool compressor_state;        // (1 byte)
+  uint32_t running_time;        // (3 bytes) compressor hour-meeter. [hours]
+} monitor_data_struct;          // TOTAL = 47 bytes
 
 typedef struct outgoing_settings_struct {
-  uint8_t msg_type;             // (1 byte)
-  uint8_t sender_id;            // (1 byte)
-  uint8_t fault_restart;        // (1 byte)
-  uint8_t system_setpoint;      // (1 byte)
-  uint8_t system_mode;          // (1 byte)
-  uint8_t system_state;         // (1 byte)
-  uint8_t room_temp;            // (1 byte)
-} outgoing_settings_struct;     // TOTAL = 7 bytes
+  MessageTypeEnum msg_type;     // (1 byte)
+  PeerIDEnum sender_id;       // (1 byte)
+  SysModeEnum system_mode;      // (1 byte)
+  SysStateEnum system_state;    // (1 byte)
+  float system_temp_sp;         // (4 bytes) [°C]
+  float room_temp;              // (4 bytes) [°C]
+} outgoing_settings_struct;     // TOTAL = 9 bytes
 
+outgoing_settings_struct settings_data;
 pairing_data_struct pairing_data;
 controller_data_struct controller_data;
-monitor_data_struct monitor_data;
-outgoing_settings_struct outgoing_settings_data;
+monitor_data_struct monitor_01;
+monitor_data_struct monitor_02;
 
 //logger functions
 void info_logger(const char *message) {
@@ -206,33 +207,40 @@ String printMAC(const uint8_t * mac_addr) {
 // add peer to peer list.
 bool addPeer(const uint8_t *peer_addr) {      // add pairing
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] adding new peer to peer list");
-  memset(&slave, 0, sizeof(slave));
-  const esp_now_peer_info_t *peer = &slave;
-  memcpy(slave.peer_addr, peer_addr, 6);
-  
-  slave.channel = WiFi_channel; // pick a channel.. 0 means it take the current STA channel (connected to AP)
-  slave.encrypt = 0; // no encryption
-  // check if the peer exists
-  bool exists = esp_now_is_peer_exist(slave.peer_addr);
+
+  //reset slaveTemplate variable
+  memset(&slaveTemplate, 0, sizeof(slaveTemplate));
+  //create reference to slaveTemplate memory loc.
+  const esp_now_peer_info_t *peer = &slaveTemplate;
+
+  //set values in peer template
+  memcpy(slaveTemplate.peer_addr, peer_addr, 6);
+  slaveTemplate.channel = WiFi_channel; // pick a channel.. 0 means it take the current STA channel (connected to AP)
+  slaveTemplate.encrypt = 0; // no encryption
+
+  // check if the peer exists and remove it from peerlist
+  bool exists = esp_now_is_peer_exist(slaveTemplate.peer_addr);
   if (exists) {
     // Slave already paired.
     info_logger("[esp-now] peer already exists, deleting existing peer.");
-    esp_err_t delStatus = esp_now_del_peer(peer_addr);
-    if (delStatus == ESP_OK) {
+    esp_err_t deleteStatus = esp_now_del_peer(peer_addr);
+    if (deleteStatus == ESP_OK) {
       info_logger("[esp-now] peer deleted!");
     } else {
       error_logger("[esp-now] error deleting peer!");
     }
   }
-  esp_err_t addStatus = esp_now_add_peer(peer);
-  if (addStatus == ESP_OK) {
-    // Pair success
-    info_logger("[esp-now] new peer added successfully.");
-    return true;
-  }
-  else
+
+  // save peer in peerlist
+  esp_err_t addPeerResult = esp_now_add_peer(peer);
+  switch (addPeerResult)
   {
-    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[esp-now] Error: %d, while adding new peer.", addStatus);
+  case ESP_OK:
+    info_logger("[esp-now] new peer added successfully");
+    return true;
+  
+  default:
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[esp-now] Error: %d, while adding new peer.", addPeerResult);
     return false;
   }
 }
@@ -241,17 +249,26 @@ bool addPeer(const uint8_t *peer_addr) {      // add pairing
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
   String printable_mac_address = printMAC(mac_addr);
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] packet sent to: %s", printable_mac_address.c_str());
-  if (status == ESP_NOW_SEND_SUCCESS) {
-    info_logger("[esp-now] delivery success.");
-  } else {
-    error_logger("[esp-now] delivery fail.");
+
+  switch (status)
+  {
+  case ESP_NOW_SEND_SUCCESS:
+    info_logger("[esp-now] message delivered!");
+    break;
+  
+  default:
+  error_logger("[esp-now] message fail delivering!");
+    break;
   }
 }
 
 
 void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len) { 
+  //logging
   String printable_mac_address = printMAC(mac_addr);
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] %d bytes of data received from: %s", len, printable_mac_address.c_str());
+  
+  //no response on IDLE state
   if (espnow_connection_state == ESPNOW_IDLE) {
     info_logger("[esp-now] Waiting to finish AP connection. Ignoring Data..");
     return;
@@ -268,24 +285,33 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len)
       info_logger("[esp-now] message received from CONTROLLER device.");
       memcpy(&controller_data, incomingData, sizeof(controller_data));
       // create a JSON document with received data and send it by event to the web page
-      root["system_mode"] = controller_data.active_system_mode;
+      root["air_return_temp"] = controller_data.air_return_temp;
+      root["air_inyect_temp"] = controller_data.air_inyect_temp;
+      root["cooling_relay"] = controller_data.cooling_relay;
+      root["turbine_relay"] = controller_data.turbine_relay;
+      root["drain_switch"] = controller_data.drain_switch;
       root["fault_code"] = controller_data.fault_code;
-      root["evap_vapor_line_temp"] = controller_data.evap_satura_temp;
-      root["evap_air_in_temp"] = controller_data.evap_air_in_temp;
-      root["evap_air_out_temp"] = controller_data.evap_air_out_temp;
       serializeJson(root, payload);
       info_logger(payload.c_str());
     }
 
-    if (sender_id == MONITOR)
+    if (sender_id == MONITOR_A)
     {
-      info_logger("[esp-now] message received from MONITOR device.");
-      memcpy(&monitor_data, incomingData, sizeof(monitor_data));
-      root["fault_code"] = monitor_data.fault_code;
-      root["vapor_temp"] = monitor_data.vapor_temp;
-      root["min_vapor_press"] = monitor_data.vapor_press[0];
-      root["avg_vapor_press"] = monitor_data.vapor_press[1];
-      root["max_vapor_press"] = monitor_data.vapor_press[2];
+      info_logger("[esp-now] message received from MONITOR_A device.");
+      memcpy(&monitor_01, incomingData, sizeof(monitor_01));
+      root["fault_code"] = monitor_01.fault_code;
+      root["vapor_temp"] = monitor_01.vapor_temp;
+      root["low_pressure"][0] = monitor_01.low_pressure[0];
+      root["low_pressure"][1] = monitor_01.low_pressure[1];
+      root["low_pressure"][2] = monitor_01.low_pressure[2];
+      root["discharge_temp"] = monitor_01.discharge_temp;
+      root["condenser_temp"] = monitor_01.condenser_temp;
+      root["liquid_temp"] = monitor_01.liquid_temp;
+      root["comp_current"][0] = monitor_01.compressor_amps[0];
+      root["comp_current"][1] = monitor_01.compressor_amps[1];
+      root["comp_current"][2] = monitor_01.compressor_amps[2];
+      root["compressor_state"] = monitor_01.compressor_state;
+
       serializeJson(root, payload);
       info_logger(payload.c_str());
     }
@@ -296,19 +322,24 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len)
     info_logger("[esp-now] message of type PAIRING arrived.");
     memcpy(&pairing_data, incomingData, sizeof(pairing_data));
     if (pairing_data.sender_id > 0) {     // do not replay to server itself
-      pairing_data.sender_id = 0;       // 0 is server
-      // Server is in AP_STA mode: peers need to send data to server soft AP MAC address 
-      WiFi.softAPmacAddress(pairing_data.macAddr);   
+      pairing_data.sender_id = SERVER;       // 0 is server
       pairing_data.channel = WiFi_channel; // current WiFi_channel value.
+
       if (addPeer(mac_addr) == true){
         info_logger("[esp-now] sending response to peer with PAIRING data.");
         esp_err_t send_result = esp_now_send(mac_addr, (uint8_t *) &pairing_data, sizeof(pairing_data));
-        if (send_result ==  ESP_OK) {
-          info_logger("[esp-now] respnse sent.");
-        } else {
+
+        switch (send_result)
+        {
+        case ESP_OK:
+          info_logger("[esp-now] pairing response sent.");
+          break;
+        
+        default:
           ESP_LOGW(TAG, "[esp-now] error sending pairing msg to peer, reason: %d", send_result);
+          break;
         }
-      };
+      }
     }
   break;
   default: error_logger("[esp-now] Invalid DATA type received...");
@@ -384,6 +415,135 @@ void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     case ARDUINO_EVENT_WIFI_AP_GOT_IP6:         info_logger("[wifi] AP IPv6 is preferred"); break;
     case ARDUINO_EVENT_WIFI_STA_GOT_IP6:        info_logger("[wifi] STA IPv6 is preferred"); break;
     default:                                    break;
+  }
+}
+
+// función que carga una String que contiene toda la información dentro del target_file del SPIFFS.
+String load_data_from_fs(const char *target_file) {
+  //-
+  if(!SPIFFS.begin(true)) {
+    error_logger("Ocurrió un error al ejecutar SPIFFS.");
+    return;
+  }
+
+  File f = SPIFFS.open(target_file);
+  if (!f) {
+    error_logger("Error al abrir el archivo solicitado.");
+    return;
+  }
+
+  String file_string = f.readString();
+  f.close();
+
+  //log
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "data loaded: %s", file_string.c_str());
+  return file_string;
+}
+
+// función que guarda una String en el target_file del SPIFFS.
+void save_data_in_fs(String data_to_save, const char *target_file) {
+  //savin data in filesystem.
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "data to save in SPIFFS: %s", data_to_save.c_str());
+  if(!SPIFFS.begin(true)) {
+    error_logger("Ocurrió un error al ejecutar SPIFFS.");
+  }
+
+  File f = SPIFFS.open(target_file, "w");
+  if (!f){
+    error_logger("Error al abrir el archivo solicitado.");
+    return;
+  }
+
+  f.print(data_to_save);
+  f.close();
+  info_logger("data saved correctly");
+  return;
+}
+
+// función que actualiza la lista de pares guardada en el SPIFFS.
+void update_peer_list_in_fs(const char *mac_address, PeerIDEnum target_peer_id) {
+
+  info_logger("updating peer info saved in filesystem.");
+  String current_peer_list = load_data_from_fs("/Peer.txt");
+  String updated_peer_list;
+  JsonDocument json_doc;
+  DeserializationError error = deserializeJson(json_doc, current_peer_list);
+
+  if (error)
+  {
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
+  }
+
+  switch (target_peer_id)
+  {
+  case CONTROLLER:
+    json_doc["controller"] = mac_address;
+    break;
+
+  case MONITOR_A:
+    json_doc["monitor_01"] = mac_address;
+    break;
+
+  case MONITOR_B:
+    json_doc["monitor_02"] = mac_address;
+  
+  default:
+    error_logger("Invalid target file ID parameter");
+    return;
+  }
+  //serialize new data.
+  serializeJson(json_doc, updated_peer_list);
+  save_data_in_fs(updated_peer_list, "/Peer.txt");
+
+  return;
+}
+
+// función que verifica que la dirección mac solicitada está guardada en spiffs.
+bool peer_exists_in_fs(const char *target_mac_address, PeerIDEnum target_peer_id){
+  //-
+  info_logger("checking if peer exists in filesystem.");
+  String peer_list = load_data_from_fs("/Peer.txt");
+  JsonDocument json_doc;
+  DeserializationError error = deserializeJson(json_doc, peer_list);
+
+  if (error)
+  {
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
+    return;
+  }
+
+  switch (target_peer_id)
+  {
+  case CONTROLLER:
+    const char * controller_mac_saved = json_doc["controller"] | "null";
+    //
+    if (strcmp(controller_mac_saved, target_mac_address) == 0){
+      info_logger("controller mac address found in fs.");
+      return true;
+    }
+    break;
+
+  case MONITOR_A:
+    const char * monitor_01_saved = json_doc["monitor_01"] | "null";
+    //
+    if (strcmp(monitor_01_saved, target_mac_address)) {
+      info_logger("monitor_01 mac address found in fs");
+      return true;
+    }
+    break;
+
+  case MONITOR_B:
+    const char * monitor_02_saved = json_doc["monitor_02"] | "null";
+    //
+    if (strcmp(monitor_02_saved, target_mac_address)) {
+      info_logger("monitor_02 mac address found in fs");
+      return true;
+    }
+    break;
+
+  default:
+    info_logger("mac address not found!");
+    return false;
   }
 }
 
@@ -1236,7 +1396,7 @@ void wifiloop() //[ok]
       info_logger("[mqtt] MQTT broker connection attempt..");
       lastMqttReconnect = millis();
       String client_id = "ac-hub-";
-      client_id += String(WiFi.macAddress());
+      client_id += deviceIdentifier;
       ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[mqtt] client id: %s", client_id.c_str());
       digitalWrite(NETWORK_LED, HIGH); //led pulse begin...
       // Try mqtt connection to the broker.
@@ -1531,7 +1691,7 @@ void setup()
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(AP_SSID, AP_PASS, 1, 1); //channel 1, hidden ssid
   WiFi.begin(esid.c_str(), epass.c_str());
-  deviceIdentifier = WiFi.softAPmacAddress().c_str();
+  deviceIdentifier = WiFi.macAddress().c_str();
   info_logger("WiFi settings ok.");
   //---------------------------------------- esp_now settings
   info_logger("Setting up ESP_NOW");
