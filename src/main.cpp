@@ -218,14 +218,14 @@ String load_data_from_fs(const char *target_file) {
   f.close();
 
   //log
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "data loaded from SPIFFS: %s", file_string.c_str());
+  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "data loaded from SPIFFS: %s", file_string.c_str());
   return file_string;
 }
 
 // función que guarda una String en el target_file del SPIFFS.
 void save_data_in_fs(String data_to_save, const char *target_file) {
   //savin data in filesystem.
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "data to save in SPIFFS: %s", data_to_save.c_str());
+  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "saving in:%s this data:%s", target_file, data_to_save.c_str());
   if(!SPIFFS.begin(true)) {
     error_logger("Ocurrió un error al ejecutar SPIFFS.");
   }
@@ -238,7 +238,7 @@ void save_data_in_fs(String data_to_save, const char *target_file) {
 
   f.print(data_to_save);
   f.close();
-  info_logger("data saved correctly");
+  info_logger("data saved correctly in SPIFFS.");
   return;
 }
 
@@ -246,7 +246,7 @@ void save_data_in_fs(String data_to_save, const char *target_file) {
 // función que actualiza la lista de pares guardada en el SPIFFS.
 void update_peer_list_in_fs(String new_pl_data) {
 
-  info_logger("updating peer info saved in filesystem.");
+  info_logger("updating peer info in filesystem.");
   String current_pl = load_data_from_fs("/Peer.txt");
   JsonDocument current_json_pl;
   JsonDocument new_json_pl_data;
@@ -265,17 +265,17 @@ void update_peer_list_in_fs(String new_pl_data) {
 
   if (strcmp(controller_mac, "null") != 0) //don't match
   {
-    debug_logger("new mac address for controller received!");
+    info_logger("new mac address for controller received!");
     current_json_pl["controller"] = controller_mac;
   }
   if (strcmp(monitor_01_mac, "null") != 0) //don't match
   {
-    debug_logger("new mac address for monitor_01 received!");
+    info_logger("new mac address for monitor_01 received!");
     current_json_pl["monitor_01"] = monitor_01_mac;
   }
   if (strcmp(monitor_02_mac, "null") != 0) //don't match
   {
-    debug_logger("new mac address for monitor_02 received!");
+    info_logger("new mac address for monitor_02 received!");
     current_json_pl["monitor_02"] = monitor_02_mac;
   }
 
@@ -302,7 +302,7 @@ bool peer_exist_in_fs(String target_mac_address, PeerIDEnum target_peer_id){
   if (target_peer_id == CONTROLLER) {
     const char * controller_mac_saved = json_doc["controller"] | "null";
     if (strcmp(controller_mac_saved, target_mac_address.c_str()) == 0){
-      debug_logger("controller mac address found in fs.");
+      info_logger("controller mac address found in fs.");
     return true;
     }
   }
@@ -310,7 +310,7 @@ bool peer_exist_in_fs(String target_mac_address, PeerIDEnum target_peer_id){
   if (target_peer_id == MONITOR_A) {
     const char * monitor_01_mac_saved = json_doc["monitor_01"] | "null";
     if (strcmp(monitor_01_mac_saved, target_mac_address.c_str()) == 0){
-      debug_logger("monitor_01 mac address found in fs.");
+      info_logger("monitor_01 mac address found in fs.");
     return true;
     }
   }
@@ -318,12 +318,12 @@ bool peer_exist_in_fs(String target_mac_address, PeerIDEnum target_peer_id){
   if (target_peer_id == MONITOR_B) {
     const char * monitor_02_mac_saved = json_doc["monitor_02"] | "null";
     if (strcmp(monitor_02_mac_saved, target_mac_address.c_str()) == 0){
-      debug_logger("monitor_02 mac address found in fs.");
+      info_logger("monitor_02 mac address found in fs.");
     return true;
     }
   }
 
-  debug_logger("mac address not found!");
+  info_logger("mac address not found in SPIFFS!");
   return false;
 
 }
@@ -470,7 +470,7 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len)
           break;
         
         default:
-          ESP_LOGW(TAG, "[esp-now] error sending pairing msg to peer, reason: %d", send_result);
+          ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[esp-now] error sending pairing msg to peer, reason: %d",  send_result);
           break;
         }
       }
@@ -555,67 +555,36 @@ void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 // Guarda el estado del sistema en spiffs
 void save_operation_state_in_fs() //[OK] [OK]
 {
-  info_logger("[spiffs] saving operation state in file system.");
-  if (!SPIFFS.begin(true))
-  {
-    error_logger("[spiffs] Ocurrió un error al ejecutar SPIFFS.");
-    return;
-  }
-  File f = SPIFFS.open("/Encendido.txt", "w"); // Borra el contenido anterior del archivo
-
-  // Mensaje de fallo al leer el contenido
-  if (!f)
-  {
-    error_logger("[spiffs] Error al abrir el archivo solicitado.");
-    delay(200);
-    return;
-  }
+  const char * fileName = "/Encendido.txt";
 
   switch (SysState)
   {
   case SYSTEM_ON:
-    f.print("on");
+    save_data_in_fs("on", fileName);
     break;
   
   case SYSTEM_OFF:
-    f.print("off");
+    save_data_in_fs("off", fileName);
     break;
 
   case SYSTEM_SLEEP:
-    f.print("sleep");
+    save_data_in_fs("sleep", fileName);
     break;
 
   }
-  f.close();
 }
 
 // Establece el encendido o apagado al inicio
 void load_operation_state_from_fs() //[OK] [OK]
 {
-  info_logger("[spiffs] loading operation state from fs");
-  if (!SPIFFS.begin(true))
-  {
-    error_logger("Ocurrió un error al ejecutar SPIFFS.");
-    return;
-  }
-
-  File file = SPIFFS.open("/Encendido.txt");
-
-  // Mensaje de fallo al leer el contenido
-  if (!file)
-  {
-    error_logger("Error al abrir el archivo.");
-    return;
-  }
-  String ESave = file.readString();
-  file.close();
+  // operation state.
+  String ESave = load_data_from_fs("/Encendido.txt");
 
   if (ESave == "on") {SysState = SYSTEM_ON;}
   else if (ESave == "off") {SysState = SYSTEM_OFF;}
   else if (ESave == "sleep") {SysState = SYSTEM_SLEEP;}
-  else {error_logger("Error: Bad value stored in Encendido.txt");}
+  else {error_logger("Error: Bad value stored in /Encendido.txt");}
 
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "operation state loaded: %s", ESave);
   return;
 }
 
@@ -634,7 +603,7 @@ void update_rtc_from_ntp() // [OK] [OK]
 
     DS3231_RTC.adjust(DateTime(ano, mes, dia, hora, minuto, segundo));
     info_logger("[RTC] DateTime updated!");
-    ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[RTC] Day: %s - %s:%s", String(dia).c_str(), String(hora).c_str(), String(minuto).c_str());
+    ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "[RTC] Day: %s - %s:%s", String(dia).c_str(), String(hora).c_str(), String(minuto).c_str());
   }
   else
   {
@@ -653,7 +622,6 @@ void timeavailable(struct timeval *tml) // [OK] [OK]
 // Save timectrl settings in filesystem.
 void save_timectrl_settings_in_fs() //[OK]
 {
-  info_logger("[spiffs] saving timectrl settings in file system.");
   String timectrl_setting;
   JsonDocument doc;
 
@@ -662,49 +630,17 @@ void save_timectrl_settings_in_fs() //[OK]
   if (sleep_condition == SLEEP_ON_TIME) {doc["off_condition"] = "on_time";} else {doc["off_condition"] = "presence";}
 
   serializeJson(doc, timectrl_setting);
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "data to save in filesystem: %s", timectrl_setting.c_str());
-
-  if (!SPIFFS.begin(true))
-  {
-    error_logger("Ocurrió un error al ejecutar SPIFFS.");
-    return;
-  }
-  File f = SPIFFS.open("/Settings.txt", "w"); // Borra el contenido anterior del archivo
-
-  // Mensaje de fallo al leer el contenido
-  if (!f)
-  {
-    error_logger("Error al abrir el archivo solicitado.");
-    delay(200);
-    return;
-  }
-  f.print(timectrl_setting);
-  f.close();
+  save_data_in_fs(timectrl_setting, "/Settings.txt");
+  return;
 }
 
 // load timectrl settings from filesystem.
 void load_timectrl_settings_from_fs() //[OK]
 {
-  info_logger("[spiffs] loading timectrl settings from file system.");
-  if (!SPIFFS.begin(true))
-  {
-    error_logger("Ocurrió un error al ejecutar SPIFFS.");
-    return;
-  }
-
-  File f = SPIFFS.open("/Settings.txt");
-
-  // Mensaje de fallo al leer el contenido
-  if (!f)
-  {
-    error_logger("Error al abrir el archivo solicitado.");
-    return;
-  }
-  String Settings = f.readString();
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "data loaded from file: %s", Settings.c_str());
+  String Settings = load_data_from_fs("/Settings.txt");
   // String input;
-  JsonDocument doc1;
-  DeserializationError error = deserializeJson(doc1, Settings);
+  JsonDocument jsonSettings;
+  DeserializationError error = deserializeJson(jsonSettings, Settings);
 
   if (error)
   {
@@ -712,21 +648,22 @@ void load_timectrl_settings_from_fs() //[OK]
     return;
   }
 
-  sleepControlEnabled = doc1["value"];
-  if (strcmp(doc1["on_condition"], "on_time") == 0) {
+  sleepControlEnabled = jsonSettings["value"];
+  if (strcmp(jsonSettings["on_condition"], "on_time") == 0) {
     wake_condition = WAKE_ON_TIME;} else {wake_condition = WAKE_ON_PRESENCE;
   }
-  if (strcmp(doc1["off_condition"], "on_time") == 0) {
+  if (strcmp(jsonSettings["off_condition"], "on_time") == 0) {
     sleep_condition = SLEEP_ON_TIME;} else {sleep_condition = SLEEP_ON_ABSENCE;
   }
 
-  f.close();
+  return;
 }
 
 // Guarda el horario de apgado de cada dia
 void save_schedule_in_fs(int HON, int HOFF, String Day, bool enable) //[OK]
 {
   String Hours;
+  String target_file = "/" + Day + ".txt";
   JsonDocument doc;
 
   doc["ON"] = HON;
@@ -734,166 +671,71 @@ void save_schedule_in_fs(int HON, int HOFF, String Day, bool enable) //[OK]
   doc["enable"] = enable;
 
   serializeJson(doc, Hours);
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "%s schedule to save in fs: %s", Day.c_str(), Hours.c_str());
-
-  if (!SPIFFS.begin(true))
-  {
-    error_logger("Ocurrió un error al ejecutar SPIFFS.");
-    return;
-  }
-  File f = SPIFFS.open("/" + Day + ".txt", "w"); // Borra el contenido anterior del archivo
-  if (!f)
-  {
-    error_logger("Error al abrir el archivo solicitado.");
-    delay(200);
-    return;
-  }
-  f.print(Hours);
-  f.close();
+  save_data_in_fs(Hours, target_file.c_str());
+  return;
 }
 
 // Aqui se guardan la configuracion del modo Auto que llega en el topico
 void save_auto_config_in_fs(int wait, int temp)
 {
-  info_logger("[spiffs] saving auto-mode settings in file system.");
   JsonDocument doc;
   String output;
 
   doc["wait"] = wait;
   doc["temp"] = temp;
-
   serializeJson(doc, output);
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "data to save in fs: %s", output.c_str());
+  save_data_in_fs(output, "/Auto.txt");
 
-  if (!SPIFFS.begin(true))
-  {
-    error_logger("Ocurrió un error al ejecutar SPIFFS.");
-    return;
-  }
-  File f = SPIFFS.open("/Auto.txt", "w"); // Borra el contenido anterior del archivo
-
-  // Mensaje de fallo al leer el contenido
-  if (!f)
-  {
-    error_logger("Error al abrir el archivo");
-    delay(200);
-    return;
-  }
-  f.println(output);
-  f.close();
   AutoTimeOut = (unsigned long)wait * 60000L; // convert minutes to miliseconds
   AutoSetpoint = temp;                            // 24
+
+  return;
 }
 
 // Aqui se guarda el modo que llega desde el topico
 void save_operation_mode_in_fs() //[OK]
 {
-  info_logger("[spiffs] saving operation mode in file system.");
-  if (!SPIFFS.begin(true))
-  {
-    error_logger("Ocurrió un error al ejecutar SPIFFS.");
-    return;
-  }
-  File f = SPIFFS.open("/Modo.txt", "w"); // Borra el contenido anterior del archivo
-
-  // Mensaje de fallo al leer el contenido
-  if (!f)
-  {
-    error_logger("Error al abrir el archivo");
-    delay(200);
-    return;
-  }
-
+  const char *fileName = "/Modo.txt";
   switch (SysMode)
   {
   case AUTO_MODE:
-    f.print("auto");
+    save_data_in_fs("auto", fileName);
     break;
 
   case FAN_MODE:
-    f.print("fan");
+    save_data_in_fs("fan", fileName);
     break;
 
   case COOL_MODE:
-    f.print("cool");
+    save_data_in_fs("cool", fileName);
     break;
   }
-  
-  f.close();
+  return;
 }
 
 // Funcion que asigna el Modo almacenado a una variable local [x]
 void load_operation_mode_from_fs() //[OK]
 {
-  info_logger("loading operation mode from fs");
-  // Temperatura SetPoint
-  if (!SPIFFS.begin(true))
-  {
-    error_logger("Ocurrió un error al ejecutar SPIFFS.");
-    return;
-  }
-
-  File file = SPIFFS.open("/Modo.txt");
-
-  // Mensaje de fallo al leer el contenido
-  if (!file)
-  {
-    error_logger("Error al abrir el archivo.");
-    return;
-  }
-  String ReadModo = file.readString();
+  String ReadModo = load_data_from_fs("/Modo.txt");
   if (ReadModo == "auto") {SysMode = AUTO_MODE;}
   else if (ReadModo == "fan") {SysMode = FAN_MODE;}
   else if (ReadModo == "cool") {SysMode = COOL_MODE;}
 
-
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "operation mode loaded: %s", ReadModo);
-
-  file.close();
+  return;
 }
 
 // Funcion que asigna las temperaturas predeterminadas a las variables globales
 void load_temp_setpoint_from_fs()
 {
-  info_logger("loading NORMAL temp. setpoint from fs");
-  // Temperatura SetPoint
-  if (!SPIFFS.begin(true))
-  {
-    error_logger("Ocurrió un error al ejecutar SPIFFS.");
-    return;
-  }
+  // Temperature SetPoint
 
-  File file = SPIFFS.open("/temp.txt");
+  String ReadTemp = load_data_from_fs("/temp.txt");
+  String AutoSetUp = load_data_from_fs("/Auto.txt");
+  JsonDocument doc;
 
-  // Mensaje de fallo al leer el contenido
-  if (!file)
-  {
-    error_logger("Error al abrir el archivo.");
-    return;
-  }
-  String ReadTemp = file.readString();
   userSetpoint = ReadTemp.toFloat();
   activeSetpoint = userSetpoint;
-  file.close();
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "NORMAL Temp. loaded: %3.2f °C", activeSetpoint);
 
-  // Temperatura en Auto
-  info_logger("loading AUTO_MODE setpoints from fs");
-  if (!SPIFFS.begin(true))
-  {
-    error_logger("Ocurrió un error al ejecutar SPIFFS.");
-    return;
-  }
-
-  File f = SPIFFS.open("/Auto.txt");
-  // Mensaje de fallo al leer el contenido
-  if (!f)
-  {
-    error_logger("Error al abrir el archivo.");
-    return;
-  }
-  String AutoSetUp = f.readString();
-  JsonDocument doc;
   DeserializationError error = deserializeJson(doc, AutoSetUp);
 
   if (error)
@@ -907,7 +749,6 @@ void load_temp_setpoint_from_fs()
   AutoSetpoint = doc["temp"]; // 24
 
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Auto setpoints loaded = wait: %d min., temp: %3.2f °C", wait, AutoSetpoint);
-  f.close();
 }
 
 // Guarda el Setpoint en SPIFF
@@ -923,57 +764,29 @@ void process_temp_sp_from_broker(String json) //[OK]
   }
 
   const char *variable = doc["variable"] | "null"; // "user_setpoint"
-  const int value = doc["value"] | 0;                    // 24
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Temp. sp received: %d °C", value);
+  const int temp_value = doc["value"] | 0;                    // 24
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Temp. sp received: %d °C", temp_value);
 
   if (strcmp(variable, "user_setpoint") != 0) {
     error_logger("Invalid json variable, expected: 'user_setpoint'");
     return;
   }
 
-  if (value < 16 || value > 28) {
+  if (temp_value < 16 || temp_value > 28) {
     error_logger("Invalid temperature range for 'user_setpoint' variable");
     return;
   }
-
-  if (!SPIFFS.begin(true))
-  {
-    error_logger("Ocurrió un error al ejecutar SPIFFS.");
-    return;
-  }
-  File f = SPIFFS.open("/temp.txt", "w"); // Borra el contenido anterior del archivo
-
-  // Mensaje de fallo al leer el contenido
-  if (!f)
-  {
-    error_logger("Error al abrir el archivo");
-    delay(200);
-    return;
-  }
-  f.print(value);
-  userSetpoint = value;
-  f.close();
+  //save data in filesystem
+  char buffer[10];
+  const char *temp_string = itoa(temp_value, buffer, 10);
+  save_data_in_fs(buffer, "/temp.txt");
+  userSetpoint = temp_value;
 }
 
 // carga los datos de la red wifi desde el spiffs.
 void load_wifi_data_from_fs()
 {
-  info_logger("[spiffs] loading WiFi data from fs.");
-  if (!SPIFFS.begin(true))
-  {
-    error_logger("[spiffs] Ocurrió un error al ejecutar SPIFFS.");
-    return;
-  }
-
-  File f = SPIFFS.open("/WiFi.txt");
-
-  // Mensaje de fallo al leer el contenido
-  if (!f)
-  {
-    error_logger("[spiffs] Error al abrir el archivo.");
-    return;
-  }
-  String wifi_data = f.readString();
+  String wifi_data = load_data_from_fs("/WiFi.txt");
   // String input;
 
   JsonDocument doc1;
@@ -989,38 +802,20 @@ void load_wifi_data_from_fs()
   esid = ESID;
   epass = EPAS;
 
-  f.close();
   return;
 }
 
 // guarda la configuración wifi recibida por smartConfig
 void save_wifi_data_in_fs()
 {
-  info_logger("[spiffs] Saving WiFi data in fs");
   JsonDocument doc;
-  String output;
+  String jsonData;
 
   doc["ssid"] = WiFi.SSID();
   doc["pass"] = WiFi.psk();
 
-  serializeJson(doc, output);
-  if (!SPIFFS.begin(true))
-  {
-    error_logger("[spiffs] Ocurrió un error al ejecutar SPIFFS.");
-    return;
-  }
-  File f = SPIFFS.open("/WiFi.txt", "w"); // Borra el contenido anterior del archivo
-
-  // Mensaje de fallo al leer el contenido
-  if (!f)
-  {
-    error_logger("[spiffs] Error al abrir el archivo...");
-    delay(200);
-    return;
-  }
-  f.println(output);
-  f.close();
-  info_logger("[spiffs] WiFi data saved!");
+  serializeJson(doc, jsonData);
+  save_data_in_fs(jsonData, "/WiFi.txt");
   return;
 }
 
@@ -1238,26 +1033,10 @@ void sleep_state_controller() //[OK]
 
   DateTime now = DS3231_RTC.now();
   String Day = Week_days[now.dayOfTheWeek()];
-
-  if (!SPIFFS.begin(true))
-  {
-    error_logger("Ocurrió un error al ejecutar SPIFFS.");
-    return;
-  }
-
-  File file = SPIFFS.open("/" + Day + ".txt");
-
-  // Mensaje de fallo al leer el contenido
-  if (!file)
-  {
-    error_logger("Error al abrir el archivo.");
-    return;
-  }
-
-  String AutoOff = file.readString();
-  file.close();
-
+  String target_file = "/" + Day + ".txt";
   JsonDocument doc;
+
+  String AutoOff = load_data_from_fs(target_file.c_str());
   DeserializationError error = deserializeJson(doc, AutoOff);
 
   if (error)
@@ -1290,9 +1069,9 @@ void sleep_state_controller() //[OK]
     minuto = String(Min);
   }
   String tiempo = hora + minuto;
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Current Time: %s", tiempo);
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Wake Up at: %i", WAKE_TIME);
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Sleep at: %i", SLEEP_TIME);
+  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "Current Time: %s", tiempo);
+  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "Wake Up at: %i", WAKE_TIME);
+  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "Sleep at: %i", SLEEP_TIME);
 
   if (SLEEP_TIME > tiempo.toInt() && WAKE_TIME < tiempo.toInt()) // horario para el sleep...
   {
@@ -1389,7 +1168,7 @@ void wifiloop() //[ok]
       delay(500);
     }
 
-    info_logger("[wifi] Connected to new WiFi network! smart config finished..");
+    info_logger("[wifi] Connected to new the network! smart config finished..");
     // save wifi credential in filesystem.
     save_wifi_data_in_fs();
     info_logger("[esp] rebooting device. bye");
