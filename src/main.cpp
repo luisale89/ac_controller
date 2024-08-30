@@ -82,7 +82,7 @@ TaskHandle_t Task1;
 // WIFI VARIABLES
 String esid = "";
 String epass = "";
-String deviceIdentifier = "";
+String hubDeviceID = "";
 const char* AP_SSID = "AC-HUB";
 const char* AP_PASS = AP_PASSWORD;
 WiFiClient espClient;
@@ -273,6 +273,7 @@ void update_peer_list_in_fs(String new_pl_data) {
     info_logger("new mac address for monitor_01 received!");
     current_json_pl["monitor_01"] = monitor_01_mac;
   }
+  
   if (strcmp(monitor_02_mac, "null") != 0) //don't match
   {
     info_logger("new mac address for monitor_02 received!");
@@ -328,10 +329,10 @@ bool peer_exist_in_fs(String target_mac_address, PeerIDEnum target_peer_id){
 
 }
 
-// Serialize mac address
-String serialize_mac(const uint8_t * mac_addr) {
+// get device id from device mac address.
+String get_device_id(const uint8_t * mac_addr) {
   char mac_str[18];
-  snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
+  snprintf(mac_str, sizeof(mac_str), "%02x%02x%02x%02x%02x%02x",
            mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
   // return mac_str;
   String str = (char*) mac_str;
@@ -381,8 +382,8 @@ bool addPeer(const uint8_t *peer_addr) {      // add pairing
 
 // callback when data is sent
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
-  String printable_mac_address = serialize_mac(mac_addr);
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] packet sent to: %s", printable_mac_address.c_str());
+  String device_id = get_device_id(mac_addr);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] packet sent to: %s", device_id.c_str());
 
   switch (status)
   {
@@ -399,8 +400,8 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 
 void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len) { 
   //logging
-  String printable_mac_address = serialize_mac(mac_addr);
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] %d bytes of data received from: %s", len, printable_mac_address.c_str());
+  String device_id = get_device_id(mac_addr);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] %d bytes of data received from: %s", len, device_id.c_str());
   
   //no response on IDLE state
   if (espnow_connection_state == ESPNOW_IDLE) {
@@ -1186,7 +1187,7 @@ void wifiloop() //[ok]
       info_logger("[mqtt] MQTT broker connection attempt..");
       lastMqttReconnect = millis();
       String client_id = "ac-hub-";
-      client_id += deviceIdentifier;
+      client_id += hubDeviceID;
       ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[mqtt] client id: %s", client_id.c_str());
       digitalWrite(NETWORK_LED, HIGH); //led pulse begin...
       // Try mqtt connection to the broker.
@@ -1295,7 +1296,7 @@ void notify_state_update_to_broker()
   doc["value"] = "stateNotification";
   doc["metadata"]["systemPrevState"] = PrevSysState;
   doc["metadata"]["systemNewState"] = SysState;
-  doc["metadata"]["deviceID"] = deviceIdentifier;
+  doc["metadata"]["deviceID"] = hubDeviceID;
   serializeJson(doc, message);
 
   PrevSysState = SysState; // assign PrevSysState the current SysState
@@ -1323,7 +1324,7 @@ void send_data_to_broker() //[ok]
 
   doc["variable"] = "ac-hub";
   doc["value"] = tdecimal;
-  doc["metadata"]["deviceID"] = deviceIdentifier;
+  doc["metadata"]["deviceID"] = hubDeviceID;
   doc["metadata"]["hub"][0] = SysState;
   doc["metadata"]["hub"][1] = SysMode;
   doc["metadata"]["hub"][2] = radarState;
@@ -1483,8 +1484,14 @@ void setup()
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(AP_SSID, AP_PASS, 1, 1); //channel 1, hidden ssid
   WiFi.begin(esid.c_str(), epass.c_str());
-  deviceIdentifier = WiFi.macAddress().c_str();
   info_logger("WiFi settings ok.");
+  //---------------------------------------- get device identifier
+  uint8_t hubMacAddress[6];
+  esp_err_t ret = esp_wifi_get_mac(WIFI_IF_AP, hubMacAddress);
+  if (ret != ESP_OK) {
+    error_logger("could not read mac address.");
+  }
+  hubDeviceID = get_device_id(hubMacAddress);
   //---------------------------------------- esp_now settings
   info_logger("Setting up ESP_NOW");
   if (esp_now_init() != ESP_OK) {
