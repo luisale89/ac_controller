@@ -70,7 +70,7 @@ const char *mqtt_broker = TEST_MQTT_BROKER;
 const char *settings_topic = "achub/system/operation/settings";
 const char *opstate_topic = "achub/system/operation/state";
 const char *opsetpoint_topic = "achub/system/operation/setpoint";
-const char *espnow_peer_topic = "achub/system/espnow/peer";
+const char *peer_list_topic = "achub/system/espnow/peer";
 const char *mqtt_username = "Token";
 const char *mqtt_password = MQTT_PASSWORD;
 const int mqtt_port = 1883;
@@ -186,6 +186,11 @@ monitor_data_struct monitor_01;
 monitor_data_struct monitor_02;
 
 //logger functions
+
+void debug_logger(const char *message) {
+  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "%s", message);
+}
+
 void info_logger(const char *message) {
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "%s", message);
 }
@@ -194,8 +199,137 @@ void error_logger(const char *message) {
   ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "%s", message);
 }
 
+//fs functions.
+// función que carga una String que contiene toda la información dentro del target_file del SPIFFS.
+String load_data_from_fs(const char *target_file) {
+  //-
+  if(!SPIFFS.begin(true)) {
+    error_logger("Ocurrió un error al ejecutar SPIFFS.");
+    return "null";
+  }
+
+  File f = SPIFFS.open(target_file);
+  if (!f) {
+    error_logger("Error al abrir el archivo solicitado.");
+    return "null";
+  }
+
+  String file_string = f.readString();
+  f.close();
+
+  //log
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "data loaded from SPIFFS: %s", file_string.c_str());
+  return file_string;
+}
+
+// función que guarda una String en el target_file del SPIFFS.
+void save_data_in_fs(String data_to_save, const char *target_file) {
+  //savin data in filesystem.
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "data to save in SPIFFS: %s", data_to_save.c_str());
+  if(!SPIFFS.begin(true)) {
+    error_logger("Ocurrió un error al ejecutar SPIFFS.");
+  }
+
+  File f = SPIFFS.open(target_file, "w");
+  if (!f){
+    error_logger("Error al abrir el archivo solicitado.");
+    return;
+  }
+
+  f.print(data_to_save);
+  f.close();
+  info_logger("data saved correctly");
+  return;
+}
+
 //esp-now functions.
-String printMAC(const uint8_t * mac_addr) {
+// función que actualiza la lista de pares guardada en el SPIFFS.
+void update_peer_list_in_fs(String new_pl_data) {
+
+  info_logger("updating peer info saved in filesystem.");
+  String current_pl = load_data_from_fs("/Peer.txt");
+  JsonDocument current_json_pl;
+  JsonDocument new_json_pl_data;
+  String output_string;
+  DeserializationError error = deserializeJson(current_json_pl, current_pl);
+  DeserializationError error_1 = deserializeJson(new_json_pl_data, new_pl_data);
+
+  if (error || error_1)
+  {
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
+  }
+
+  const char *controller_mac = new_json_pl_data["controller"] | "null";
+  const char *monitor_01_mac = new_json_pl_data["monitor_01"] | "null";
+  const char *monitor_02_mac = new_json_pl_data["monitor_02"] | "null";
+
+  if (strcmp(controller_mac, "null") != 0) //don't match
+  {
+    debug_logger("new mac address for controller received!");
+    current_json_pl["controller"] = controller_mac;
+  }
+  if (strcmp(monitor_01_mac, "null") != 0) //don't match
+  {
+    debug_logger("new mac address for monitor_01 received!");
+    current_json_pl["monitor_01"] = monitor_01_mac;
+  }
+  if (strcmp(monitor_02_mac, "null") != 0) //don't match
+  {
+    debug_logger("new mac address for monitor_02 received!");
+    current_json_pl["monitor_02"] = monitor_02_mac;
+  }
+
+  //serialize new data.
+  serializeJson(current_json_pl, output_string);
+  save_data_in_fs(output_string, "/Peer.txt");
+
+  return;
+}
+
+// función que verifica que la dirección mac solicitada está guardada en spiffs.
+bool peer_exist_in_fs(String target_mac_address, PeerIDEnum target_peer_id){
+  //-
+  String peer_list = load_data_from_fs("/Peer.txt");
+  JsonDocument json_doc;
+  DeserializationError error = deserializeJson(json_doc, peer_list);
+
+  if (error)
+  {
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
+    return false;
+  }
+
+  if (target_peer_id == CONTROLLER) {
+    const char * controller_mac_saved = json_doc["controller"] | "null";
+    if (strcmp(controller_mac_saved, target_mac_address.c_str()) == 0){
+      debug_logger("controller mac address found in fs.");
+    return true;
+    }
+  }
+
+  if (target_peer_id == MONITOR_A) {
+    const char * monitor_01_mac_saved = json_doc["monitor_01"] | "null";
+    if (strcmp(monitor_01_mac_saved, target_mac_address.c_str()) == 0){
+      debug_logger("monitor_01 mac address found in fs.");
+    return true;
+    }
+  }
+
+  if (target_peer_id == MONITOR_B) {
+    const char * monitor_02_mac_saved = json_doc["monitor_02"] | "null";
+    if (strcmp(monitor_02_mac_saved, target_mac_address.c_str()) == 0){
+      debug_logger("monitor_02 mac address found in fs.");
+    return true;
+    }
+  }
+
+  debug_logger("mac address not found!");
+  return false;
+
+}
+
+// Serialize mac address
+String serialize_mac(const uint8_t * mac_addr) {
   char mac_str[18];
   snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
            mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
@@ -247,7 +381,7 @@ bool addPeer(const uint8_t *peer_addr) {      // add pairing
 
 // callback when data is sent
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
-  String printable_mac_address = printMAC(mac_addr);
+  String printable_mac_address = serialize_mac(mac_addr);
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] packet sent to: %s", printable_mac_address.c_str());
 
   switch (status)
@@ -265,7 +399,7 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 
 void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len) { 
   //logging
-  String printable_mac_address = printMAC(mac_addr);
+  String printable_mac_address = serialize_mac(mac_addr);
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] %d bytes of data received from: %s", len, printable_mac_address.c_str());
   
   //no response on IDLE state
@@ -415,135 +549,6 @@ void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     case ARDUINO_EVENT_WIFI_AP_GOT_IP6:         info_logger("[wifi] AP IPv6 is preferred"); break;
     case ARDUINO_EVENT_WIFI_STA_GOT_IP6:        info_logger("[wifi] STA IPv6 is preferred"); break;
     default:                                    break;
-  }
-}
-
-// función que carga una String que contiene toda la información dentro del target_file del SPIFFS.
-String load_data_from_fs(const char *target_file) {
-  //-
-  if(!SPIFFS.begin(true)) {
-    error_logger("Ocurrió un error al ejecutar SPIFFS.");
-    return;
-  }
-
-  File f = SPIFFS.open(target_file);
-  if (!f) {
-    error_logger("Error al abrir el archivo solicitado.");
-    return;
-  }
-
-  String file_string = f.readString();
-  f.close();
-
-  //log
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "data loaded: %s", file_string.c_str());
-  return file_string;
-}
-
-// función que guarda una String en el target_file del SPIFFS.
-void save_data_in_fs(String data_to_save, const char *target_file) {
-  //savin data in filesystem.
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "data to save in SPIFFS: %s", data_to_save.c_str());
-  if(!SPIFFS.begin(true)) {
-    error_logger("Ocurrió un error al ejecutar SPIFFS.");
-  }
-
-  File f = SPIFFS.open(target_file, "w");
-  if (!f){
-    error_logger("Error al abrir el archivo solicitado.");
-    return;
-  }
-
-  f.print(data_to_save);
-  f.close();
-  info_logger("data saved correctly");
-  return;
-}
-
-// función que actualiza la lista de pares guardada en el SPIFFS.
-void update_peer_list_in_fs(const char *mac_address, PeerIDEnum target_peer_id) {
-
-  info_logger("updating peer info saved in filesystem.");
-  String current_peer_list = load_data_from_fs("/Peer.txt");
-  String updated_peer_list;
-  JsonDocument json_doc;
-  DeserializationError error = deserializeJson(json_doc, current_peer_list);
-
-  if (error)
-  {
-    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
-  }
-
-  switch (target_peer_id)
-  {
-  case CONTROLLER:
-    json_doc["controller"] = mac_address;
-    break;
-
-  case MONITOR_A:
-    json_doc["monitor_01"] = mac_address;
-    break;
-
-  case MONITOR_B:
-    json_doc["monitor_02"] = mac_address;
-  
-  default:
-    error_logger("Invalid target file ID parameter");
-    return;
-  }
-  //serialize new data.
-  serializeJson(json_doc, updated_peer_list);
-  save_data_in_fs(updated_peer_list, "/Peer.txt");
-
-  return;
-}
-
-// función que verifica que la dirección mac solicitada está guardada en spiffs.
-bool peer_exists_in_fs(const char *target_mac_address, PeerIDEnum target_peer_id){
-  //-
-  info_logger("checking if peer exists in filesystem.");
-  String peer_list = load_data_from_fs("/Peer.txt");
-  JsonDocument json_doc;
-  DeserializationError error = deserializeJson(json_doc, peer_list);
-
-  if (error)
-  {
-    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
-    return;
-  }
-
-  switch (target_peer_id)
-  {
-  case CONTROLLER:
-    const char * controller_mac_saved = json_doc["controller"] | "null";
-    //
-    if (strcmp(controller_mac_saved, target_mac_address) == 0){
-      info_logger("controller mac address found in fs.");
-      return true;
-    }
-    break;
-
-  case MONITOR_A:
-    const char * monitor_01_saved = json_doc["monitor_01"] | "null";
-    //
-    if (strcmp(monitor_01_saved, target_mac_address)) {
-      info_logger("monitor_01 mac address found in fs");
-      return true;
-    }
-    break;
-
-  case MONITOR_B:
-    const char * monitor_02_saved = json_doc["monitor_02"] | "null";
-    //
-    if (strcmp(monitor_02_saved, target_mac_address)) {
-      info_logger("monitor_02 mac address found in fs");
-      return true;
-    }
-    break;
-
-  default:
-    info_logger("mac address not found!");
-    return false;
   }
 }
 
@@ -1204,6 +1209,12 @@ void mqtt_message_callback(char *message_topic, byte *payload, unsigned int leng
     //update system temp setpoint.
     temp_setpoint_controller();
   }
+  else if (strcmp(message_topic, peer_list_topic) == 0)
+  {
+    // actualiza la lista de pares en el spiffs.
+    info_logger("processing peer update.");
+    update_peer_list_in_fs(Mensaje);
+  }
   else {
     error_logger("mqtt topic not implemented.");
   }
@@ -1411,6 +1422,8 @@ void wifiloop() //[ok]
         info_logger("[mqtt] Topic 2 ok");
         mqtt_client.subscribe(opsetpoint_topic);
         info_logger("[mqtt] Topic 3 ok");
+        mqtt_client.subscribe(peer_list_topic);
+        info_logger("[mqtt] Topic 4 ok");
         lastSaluteTime = millis();
         Salute = false; // flag to send connection message.
         info_logger("[mqtt] MQTT connection done. **");
