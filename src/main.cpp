@@ -128,26 +128,23 @@ const int daylightOffset_sec = 0;
 // ESP-NOW VARS
 esp_now_peer_info_t slaveTemplate;
 int32_t WiFi_channel = 1;
-char controller_mac_address[] = "00:00:00:00:00:00";
-char monitor_01_mac_address[] = "00:00:00:00:00:00";
-char monitor_02_mac_address[] = "00:00:00:00:00:00";
 enum MessageTypeEnum {PAIRING, DATA,};
-enum PeerIDEnum {SERVER, CONTROLLER, MONITOR_A, MONITOR_B};
+enum PeerRoleID {SERVER, CONTROLLER, MONITOR_A, MONITOR_B, UNSET};
 enum EspNowState {ESPNOW_OFFLINE, ESPNOW_ONLINE, ESPNOW_IDLE,};
 EspNowState espnow_connection_state = ESPNOW_IDLE;
 // MessageTypeEnum espnow_msg_type;
 // SystemModes espnow_system_mode;
-// PeerIDEnum espnow_peer_id;
+// PeerRoleID espnow_peer_id;
 typedef struct pairing_data_struct {
   MessageTypeEnum msg_type;             // (1 byte)
-  PeerIDEnum sender_id;       // (1 byte)
+  PeerRoleID sender_role;       // (1 byte)
   uint8_t macAddr[6];           // (6 bytes)
   uint8_t channel;              // (1 byte)
 } pairing_data_struct;          // TOTAL = 9 bytes
 
 typedef struct controller_data_struct {
   MessageTypeEnum msg_type;    // (1 byte)
-  PeerIDEnum sender_id;       // (1 byte)
+  PeerRoleID sender_role;       // (1 byte)
   uint8_t fault_code;      // (1 byte)
   float air_return_temp;   // (4 bytes) [°C]
   float air_inyect_temp;   // (4 bytes) [°C]
@@ -158,7 +155,7 @@ typedef struct controller_data_struct {
 
 typedef struct monitor_data_struct {
   MessageTypeEnum msg_type;     // (1 byte)
-  PeerIDEnum sender_id;       // (1 byte)
+  PeerRoleID sender_role;       // (1 byte)
   uint8_t fault_code;           // (1 byte) 0-no_fault; 1..255 monitor_fault_codes.
   float vapor_temp;             // (4 bytes) vapor line temperature readings [°C]
   float low_pressure[3];        // (12 bytes) min - avg - max | low pressure readings [psi]
@@ -172,7 +169,7 @@ typedef struct monitor_data_struct {
 
 typedef struct outgoing_settings_struct {
   MessageTypeEnum msg_type;     // (1 byte)
-  PeerIDEnum sender_id;       // (1 byte)
+  PeerRoleID sender_role;       // (1 byte)
   SysModeEnum system_mode;      // (1 byte)
   SysStateEnum system_state;    // (1 byte)
   float system_temp_sp;         // (4 bytes) [°C]
@@ -273,7 +270,7 @@ void update_peer_list_in_fs(String new_pl_data) {
     info_logger("new mac address for monitor_01 received!");
     current_json_pl["monitor_01"] = monitor_01_mac;
   }
-  
+
   if (strcmp(monitor_02_mac, "null") != 0) //don't match
   {
     info_logger("new mac address for monitor_02 received!");
@@ -288,7 +285,8 @@ void update_peer_list_in_fs(String new_pl_data) {
 }
 
 // función que verifica que la dirección mac solicitada está guardada en spiffs.
-bool peer_exist_in_fs(String target_mac_address, PeerIDEnum target_peer_id){
+// y devuelve el rol del dispositivo.
+PeerRoleID get_peer_role_from_fs(String target_dev_id){
   //-
   String peer_list = load_data_from_fs("/Peer.txt");
   JsonDocument json_doc;
@@ -297,35 +295,29 @@ bool peer_exist_in_fs(String target_mac_address, PeerIDEnum target_peer_id){
   if (error)
   {
     ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
-    return false;
+    return UNSET;
   }
 
-  if (target_peer_id == CONTROLLER) {
-    const char * controller_mac_saved = json_doc["controller"] | "null";
-    if (strcmp(controller_mac_saved, target_mac_address.c_str()) == 0){
-      info_logger("controller mac address found in fs.");
-    return true;
-    }
+  const char * controller_mac_saved = json_doc["controller"] | "null";
+  if (strcmp(controller_mac_saved, target_dev_id.c_str()) == 0){
+    info_logger("device found as controller.");
+    return CONTROLLER;
   }
 
-  if (target_peer_id == MONITOR_A) {
-    const char * monitor_01_mac_saved = json_doc["monitor_01"] | "null";
-    if (strcmp(monitor_01_mac_saved, target_mac_address.c_str()) == 0){
-      info_logger("monitor_01 mac address found in fs.");
-    return true;
-    }
+  const char * monitor_01_mac_saved = json_doc["monitor_01"] | "null";
+  if (strcmp(monitor_01_mac_saved, target_dev_id.c_str()) == 0){
+    info_logger("device found as monitor_01");
+    return MONITOR_A;
   }
 
-  if (target_peer_id == MONITOR_B) {
-    const char * monitor_02_mac_saved = json_doc["monitor_02"] | "null";
-    if (strcmp(monitor_02_mac_saved, target_mac_address.c_str()) == 0){
-      info_logger("monitor_02 mac address found in fs.");
-    return true;
-    }
+  const char * monitor_02_mac_saved = json_doc["monitor_02"] | "null";
+  if (strcmp(monitor_02_mac_saved, target_dev_id.c_str()) == 0){
+    info_logger("device found as monitor_02");
+    return MONITOR_B;
   }
 
-  info_logger("mac address not found in SPIFFS!");
-  return false;
+  info_logger("device not found in SPIFFS!");
+  return UNSET;
 
 }
 
@@ -357,12 +349,13 @@ bool addPeer(const uint8_t *peer_addr) {      // add pairing
   bool exists = esp_now_is_peer_exist(slaveTemplate.peer_addr);
   if (exists) {
     // Slave already paired.
-    info_logger("[esp-now] peer already exists, deleting existing peer.");
+    info_logger("peer already exists, deleting existing data.");
     esp_err_t deleteStatus = esp_now_del_peer(peer_addr);
     if (deleteStatus == ESP_OK) {
-      info_logger("[esp-now] peer deleted!");
+      info_logger("peer deleted!");
     } else {
-      error_logger("[esp-now] error deleting peer!");
+      error_logger("error deleting peer!");
+      return false;
     }
   }
 
@@ -371,11 +364,11 @@ bool addPeer(const uint8_t *peer_addr) {      // add pairing
   switch (addPeerResult)
   {
   case ESP_OK:
-    info_logger("[esp-now] new peer added successfully");
+    info_logger("new peer added successfully");
     return true;
   
   default:
-    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[esp-now] Error: %d, while adding new peer.", addPeerResult);
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "Error: %d, while adding new peer.", addPeerResult);
     return false;
   }
 }
@@ -411,11 +404,11 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len)
   JsonDocument root;
   String payload;
   uint8_t type = incomingData[0];       // first message byte is the type of message 
-  uint8_t sender_id = incomingData[1];  // second message byte is the sender_id.
+  uint8_t sender_role = incomingData[1];  // second message byte is the sender_role.
   switch (type) {
   case DATA:                           // the message is data type
     info_logger("[esp-now] message of type DATA arrived.");
-    if (sender_id == CONTROLLER) 
+    if (sender_role == CONTROLLER) 
     {
       info_logger("[esp-now] message received from CONTROLLER device.");
       memcpy(&controller_data, incomingData, sizeof(controller_data));
@@ -430,7 +423,7 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len)
       info_logger(payload.c_str());
     }
 
-    if (sender_id == MONITOR_A)
+    if (sender_role == MONITOR_A)
     {
       info_logger("[esp-now] message received from MONITOR_A device.");
       memcpy(&monitor_01, incomingData, sizeof(monitor_01));
@@ -456,9 +449,15 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len)
   case PAIRING:                            // the message is a pairing request 
     info_logger("[esp-now] message of type PAIRING arrived.");
     memcpy(&pairing_data, incomingData, sizeof(pairing_data));
-    if (pairing_data.sender_id > 0) {     // do not replay to server itself
-      pairing_data.sender_id = SERVER;       // 0 is server
+    if (pairing_data.sender_role > 0) {     // do not replay to server itself
+      pairing_data.sender_role = SERVER;       // 0 is server
       pairing_data.channel = WiFi_channel; // current WiFi_channel value.
+
+      PeerRoleID peer_role = get_peer_role_from_fs(get_device_id(mac_addr));
+      if (peer_role == UNSET) {
+        info_logger("[esp-now] device unset, try again later.");
+        return;
+      }
 
       if (addPeer(mac_addr) == true){
         info_logger("[esp-now] sending response to peer with PAIRING data.");
