@@ -139,8 +139,7 @@ typedef struct pairing_data_struct {
   MessageTypeEnum msg_type;     // (1 byte)
   PeerRoleID sender_role;       // (1 byte)
   PeerRoleID device_new_role;   // (1 byte)
-  uint8_t macAddr[6];           // (6 bytes)
-  uint8_t channel;              // (1 byte)
+  uint8_t channel;              // (1 byte) - 0 is default, let this value for future changes.
 } pairing_data_struct;          // TOTAL = 9 bytes
 
 typedef struct controller_data_struct {
@@ -339,7 +338,7 @@ String get_device_id(const uint8_t * mac_addr) {
 }
 
 // add peer to peer list.
-bool addPeer(const uint8_t *peer_addr) {      // add pairing
+bool add_peer_to_plist(const uint8_t *peer_addr) {      // add pairing
   info_logger("[esp-now] adding new peer to peer list");
 
   //reset slaveTemplate variable
@@ -383,16 +382,15 @@ bool addPeer(const uint8_t *peer_addr) {      // add pairing
 // callback when data is sent
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
   String device_id = get_device_id(mac_addr);
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] packet sent to: %s", device_id.c_str());
 
   switch (status)
   {
   case ESP_NOW_SEND_SUCCESS:
-    info_logger("[esp-now] message delivered!");
+    ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] packet to: %s has been sent!", device_id.c_str());
     break;
   
   default:
-  error_logger("[esp-now] message fail delivering!");
+  ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[esp-now] packet to: %s not sent.", device_id.c_str());
     break;
   }
 }
@@ -482,7 +480,7 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len)
     pairing_data.device_new_role = device_role_in_fs; // role of the receiver device, stored in filesystem.
     pairing_data.channel = 0;  // current WiFi channel.
 
-    if (addPeer(mac_addr) == true){
+    if (add_peer_to_plist(mac_addr) == true){
       info_logger("[esp-now] sending response to peer with PAIRING data.");
       esp_err_t send_result = esp_now_send(mac_addr, (uint8_t *) &pairing_data, sizeof(pairing_data));
 
@@ -1304,11 +1302,63 @@ void update_IO() //[ok]
   }
 }
 
+// Envío de data de configuración a los pares.
+void send_data_to_peers()
+{
+  //-
+  esp_now_peer_num number_of_peers;
+  esp_now_get_peer_num(&number_of_peers);
+  if (number_of_peers.total_num == 0)
+  {
+    info_logger("[esp-now] peer list is empty. no message sent!");
+    return;
+  }
+
+  if (espnow_connection_state == ESPNOW_IDLE)
+  {
+    info_logger("[esp-now] connection state idle, no message sent!");
+    return;
+  }
+
+  // update settings variables.
+  settings_data.msg_type = DATA;
+  settings_data.sender_role = SERVER;
+  settings_data.system_mode = SysMode;
+  settings_data.system_state = SysState;
+  settings_data.system_temp_sp = activeSetpoint;
+  settings_data.room_temp = ambient_temp;
+
+  // send data to peers.
+  esp_err_t send_result = esp_now_send(NULL, (uint8_t *) &settings_data, sizeof(settings_data));
+
+  switch (send_result)
+  {
+  case ESP_OK:
+    info_logger("[esp-now] settings sent.");
+    break;
+  
+  default:
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[esp-now] error sending pairing msg to peer, reason: %d",  send_result);
+    break;
+  }
+
+  return;
+}
+
 //notifica al broker el cambio de estado del sistema.
 void notify_state_update_to_broker()
 {
-  if (PrevSysState == SysState || !mqtt_client.connected())
+  if (PrevSysState == SysState)
   {
+    return;
+  }
+
+  // update sysState to the peers.
+  send_data_to_peers();
+
+  if (!mqtt_client.connected())
+  {
+    info_logger("mqtt client disconnected, state update could not be sent.");
     return;
   }
 
@@ -1390,6 +1440,8 @@ void sensors_read(void *pvParameters)
       sleep_state_controller();
       // Funcion que regula latemperatura segun el modo (Cool, auto, fan)
       temp_setpoint_controller();
+      // Envía las configuraciones a los pares esp-now.
+      send_data_to_peers();
 
       // logging
       ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Radar State: %s", radarState ? "Detecting": "Empty room");
