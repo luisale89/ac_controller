@@ -89,6 +89,7 @@ WiFiClient espClient;
 PubSubClient mqtt_client(espClient);
 int wiFiReconnectAttempt = 0;
 const int MAX_RECONNECT_ATTEMPTS = 33;
+bool wiFiReconnectFlag = false;
 
 // RTC
 RTC_DS3231 DS3231_RTC;
@@ -127,7 +128,6 @@ const int daylightOffset_sec = 0;
 
 // ESP-NOW VARS
 esp_now_peer_info_t slaveTemplate;
-int32_t WiFi_channel = 1;
 enum MessageTypeEnum {PAIRING, DATA,};
 enum PeerRoleID {SERVER, CONTROLLER, MONITOR_A, MONITOR_B, UNSET};
 enum EspNowState {ESPNOW_OFFLINE, ESPNOW_ONLINE, ESPNOW_IDLE,};
@@ -136,15 +136,16 @@ EspNowState espnow_connection_state = ESPNOW_IDLE;
 // SystemModes espnow_system_mode;
 // PeerRoleID espnow_peer_id;
 typedef struct pairing_data_struct {
-  MessageTypeEnum msg_type;             // (1 byte)
+  MessageTypeEnum msg_type;     // (1 byte)
   PeerRoleID sender_role;       // (1 byte)
+  PeerRoleID device_new_role;   // (1 byte)
   uint8_t macAddr[6];           // (6 bytes)
   uint8_t channel;              // (1 byte)
 } pairing_data_struct;          // TOTAL = 9 bytes
 
 typedef struct controller_data_struct {
-  MessageTypeEnum msg_type;    // (1 byte)
-  PeerRoleID sender_role;       // (1 byte)
+  MessageTypeEnum msg_type;// (1 byte)
+  PeerRoleID sender_role;  // (1 byte)
   uint8_t fault_code;      // (1 byte)
   float air_return_temp;   // (4 bytes) [°C]
   float air_inyect_temp;   // (4 bytes) [°C]
@@ -251,9 +252,15 @@ void update_peer_list_in_fs(String new_pl_data) {
   DeserializationError error = deserializeJson(current_json_pl, current_pl);
   DeserializationError error_1 = deserializeJson(new_json_pl_data, new_pl_data);
 
-  if (error || error_1)
+  if (error)
   {
-    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "current_json_pl Deserialization error raised with code: %s", error.c_str());
+    return;
+  } 
+  else if (error_1) 
+  {
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "new_json_pl Deserialization error raised with code: %s", error_1.c_str());
+    return;
   }
 
   const char *controller_mac = new_json_pl_data["controller"] | "null";
@@ -333,7 +340,7 @@ String get_device_id(const uint8_t * mac_addr) {
 
 // add peer to peer list.
 bool addPeer(const uint8_t *peer_addr) {      // add pairing
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] adding new peer to peer list");
+  info_logger("[esp-now] adding new peer to peer list");
 
   //reset slaveTemplate variable
   memset(&slaveTemplate, 0, sizeof(slaveTemplate));
@@ -342,7 +349,7 @@ bool addPeer(const uint8_t *peer_addr) {      // add pairing
 
   //set values in peer template
   memcpy(slaveTemplate.peer_addr, peer_addr, 6);
-  slaveTemplate.channel = WiFi_channel; // pick a channel.. 0 means it take the current STA channel (connected to AP)
+  slaveTemplate.channel = 0; // pick a channel.. 0 means it take the current STA channel
   slaveTemplate.encrypt = 0; // no encryption
 
   // check if the peer exists and remove it from peerlist
@@ -392,23 +399,38 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 
 
 void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len) { 
-  //logging
-  String device_id = get_device_id(mac_addr);
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] %d bytes of data received from: %s", len, device_id.c_str());
-  
   //no response on IDLE state
   if (espnow_connection_state == ESPNOW_IDLE) {
-    info_logger("[esp-now] Waiting to finish AP connection. Ignoring Data..");
+    info_logger("[esp-now] Waiting to finish AP connection. Ignoring data...");
     return;
   }
+
+  String device_id = get_device_id(mac_addr);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] %d bytes of data received from: %s", len, device_id.c_str());
+  PeerRoleID device_role_in_fs = get_peer_role_from_fs(device_id);
+  
+  // to enable devices to communicate with the server, the user must send a mqtt message with the mac address and the role
+  // of the device. Only then, the server can process messages from that mac address.
+  // check 'update_peer_list_in_fs()' function for more information.
+  if (device_role_in_fs == UNSET) {
+    info_logger("[esp-now] device is unset in fs. Ignoring data...");
+    return;
+  }
+
   JsonDocument root;
   String payload;
-  uint8_t type = incomingData[0];       // first message byte is the type of message 
-  uint8_t sender_role = incomingData[1];  // second message byte is the sender_role.
-  switch (type) {
-  case DATA:                           // the message is data type
+  uint8_t message_type = incomingData[0];       // first message byte is the type of message 
+
+  switch (message_type) {
+  case DATA:                           
+  // the message is data type
     info_logger("[esp-now] message of type DATA arrived.");
-    if (sender_role == CONTROLLER) 
+
+    // to.do:
+    // create a condition to check if the device's role has been updated. if so, respond the message calling for a new
+    // pairing process.
+    
+    if (device_role_in_fs == CONTROLLER) 
     {
       info_logger("[esp-now] message received from CONTROLLER device.");
       memcpy(&controller_data, incomingData, sizeof(controller_data));
@@ -420,10 +442,10 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len)
       root["drain_switch"] = controller_data.drain_switch;
       root["fault_code"] = controller_data.fault_code;
       serializeJson(root, payload);
-      info_logger(payload.c_str());
+      debug_logger(payload.c_str());
     }
 
-    if (sender_role == MONITOR_A)
+    if (device_role_in_fs == MONITOR_A)
     {
       info_logger("[esp-now] message received from MONITOR_A device.");
       memcpy(&monitor_01, incomingData, sizeof(monitor_01));
@@ -441,62 +463,54 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len)
       root["compressor_state"] = monitor_01.compressor_state;
 
       serializeJson(root, payload);
-      info_logger(payload.c_str());
+      debug_logger(payload.c_str());
     }
 
     break;
   
-  case PAIRING:                            // the message is a pairing request 
+  case PAIRING:                           
+  // the message is a pairing request 
     info_logger("[esp-now] message of type PAIRING arrived.");
     memcpy(&pairing_data, incomingData, sizeof(pairing_data));
-    if (pairing_data.sender_role > 0) {     // do not replay to server itself
-      pairing_data.sender_role = SERVER;       // 0 is server
-      pairing_data.channel = WiFi_channel; // current WiFi_channel value.
+    //-
+    if (pairing_data.sender_role == SERVER) {
+      error_logger("[esp-now] message from SERVER device received. wtf!");
+      return; // do not replay to server itself.
+    }
 
-      PeerRoleID peer_role = get_peer_role_from_fs(get_device_id(mac_addr));
-      if (peer_role == UNSET) {
-        info_logger("[esp-now] device unset, try again later.");
-        return;
-      }
+    pairing_data.sender_role = SERVER;    // server sending a response.
+    pairing_data.device_new_role = device_role_in_fs; // role of the receiver device, stored in filesystem.
+    pairing_data.channel = 0;  // current WiFi channel.
 
-      if (addPeer(mac_addr) == true){
-        info_logger("[esp-now] sending response to peer with PAIRING data.");
-        esp_err_t send_result = esp_now_send(mac_addr, (uint8_t *) &pairing_data, sizeof(pairing_data));
+    if (addPeer(mac_addr) == true){
+      info_logger("[esp-now] sending response to peer with PAIRING data.");
+      esp_err_t send_result = esp_now_send(mac_addr, (uint8_t *) &pairing_data, sizeof(pairing_data));
 
-        switch (send_result)
-        {
-        case ESP_OK:
-          info_logger("[esp-now] pairing response sent.");
-          break;
-        
-        default:
-          ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[esp-now] error sending pairing msg to peer, reason: %d",  send_result);
-          break;
-        }
+      switch (send_result)
+      {
+      case ESP_OK:
+        info_logger("[esp-now] pairing response sent.");
+        break;
+      
+      default:
+        ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[esp-now] error sending pairing msg to peer, reason: %d",  send_result);
+        break;
       }
     }
   break;
-  default: error_logger("[esp-now] Invalid DATA type received...");
+  default: error_logger("[esp-now] Invalid data TYPE received...");
   }
 }
 
-void set_AP_for_ESPNOW_offline_mode() {
+void set_station_for_espnow_offline_mode() {
   // this function allows offline esp-now communication, in case of getting disconnected from the WiFi network.
-  info_logger("[wifi] Setting up to communicate over esp_now while device is offline.");
-  WiFi.disconnect();
+  info_logger("[wifi] Setting up to communicate over esp-now disconnected from the router.");
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] channel: %d", WiFi.channel());
-  WiFi_channel = WiFi.channel();
-  WiFi.softAP(AP_SSID, AP_PASS, WiFi_channel, 1); //channel, hidden ssid
   espnow_connection_state = ESPNOW_OFFLINE;
+  lastWifiReconnect = millis(); // set timer for reconnect to the router in 5 minutes.
+  wiFiReconnectFlag = true;
   return;
 }
-
-void test_AP_for_ESPNOW_online_mode(){
-  info_logger("[wifi] Setting up to communicate over esp_now while device is online.");
-  WiFi.begin(esid.c_str(), epass.c_str());
-  wiFiReconnectAttempt = 0;
-}
-
 
 void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] event code: %d", event);
@@ -505,23 +519,23 @@ void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     case ARDUINO_EVENT_WIFI_SCAN_DONE:           info_logger("[wifi] Completed scan for access points"); break;
     case ARDUINO_EVENT_WIFI_STA_START:           info_logger("[wifi] Client started"); break;
     case ARDUINO_EVENT_WIFI_STA_STOP:            info_logger("[wifi] Clients stopped"); break;
-    case ARDUINO_EVENT_WIFI_STA_CONNECTED:       
-      WiFi_channel = WiFi.channel();
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
       espnow_connection_state = ESPNOW_ONLINE;
       wiFiReconnectAttempt = 0;
-      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] Connected to the AP on channel: %d", WiFi_channel);
+      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] Connected to the AP on channel: %d", WiFi.channel());
       ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] RSSI: %d", WiFi.RSSI());
-      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] SOFT AP MAC Address: %s", WiFi.softAPmacAddress().c_str());
       ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] STA MAC Address: %s", WiFi.macAddress().c_str());
+      // ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] SOFT AP MAC Address: %s", WiFi.softAPmacAddress().c_str());
       break;
 
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
       if (wiFiReconnectAttempt > MAX_RECONNECT_ATTEMPTS) {
         wiFiReconnectAttempt = 0;
         info_logger("[wifi] reached max_reconnect_attempts.");
-        set_AP_for_ESPNOW_offline_mode();
+        set_station_for_espnow_offline_mode();
         break;
       }
+      //-
       wiFiReconnectAttempt ++;
       info_logger("[wifi] Disconnected from WiFi Access Point"); 
       ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] lost connection. Reason code: %d", info.wifi_sta_disconnected.reason);
@@ -1234,6 +1248,15 @@ void wifiloop() //[ok]
       network_led_state = (network_led_state == LOW) ? HIGH : LOW;
       digitalWrite(NETWORK_LED, network_led_state);
     }
+
+    if (currentTime - lastWifiReconnect >= wifiReconnectInterval && wiFiReconnectFlag == true)
+    {
+      info_logger("[wifi] testing new connection with the router.");
+      WiFi.reconnect();
+      wiFiReconnectFlag = false;
+      wiFiReconnectAttempt = 0;
+    }
+
     return;
   }
 }
@@ -1478,11 +1501,9 @@ void setup()
   // WifiSettings
   info_logger("WiFi settings and config.");
   WiFi.onEvent(WiFiEvent);
-  WiFi.disconnect();
-  delay(500);
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP(AP_SSID, AP_PASS, 1, 1); //channel 1, hidden ssid
+  WiFi.mode(WIFI_AP);
   WiFi.begin(esid.c_str(), epass.c_str());
+  // WiFi.softAP(AP_SSID, AP_PASS, 1, 1); //channel 1, hidden ssid
   info_logger("WiFi settings ok.");
   //---------------------------------------- get device identifier
   uint8_t hubMacAddress[6];
