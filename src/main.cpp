@@ -1602,6 +1602,7 @@ void setup()
 
 void loop()
 {
+  //main loop.
   wifiloop();
   mqtt_client.loop();
   delay(10);
