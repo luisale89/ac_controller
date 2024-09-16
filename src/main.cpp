@@ -82,7 +82,7 @@ TaskHandle_t Task1;
 // WIFI VARIABLES
 String esid = "";
 String epass = "";
-String hubDeviceID = "";
+String hub_device_serial = "";
 const char* AP_SSID = "AC-HUB";
 const char* AP_PASS = AP_PASSWORD;
 WiFiClient espClient;
@@ -200,11 +200,6 @@ void error_logger(const char *message) {
 // función que carga una String que contiene toda la información dentro del target_file del SPIFFS.
 String load_data_from_fs(const char *target_file) {
   //-
-  if(!SPIFFS.begin(true)) {
-    error_logger("Ocurrió un error al ejecutar SPIFFS.");
-    return "null";
-  }
-
   File f = SPIFFS.open(target_file);
   if (!f) {
     error_logger("Error al abrir el archivo solicitado.");
@@ -223,9 +218,6 @@ String load_data_from_fs(const char *target_file) {
 void save_data_in_fs(String data_to_save, const char *target_file) {
   //savin data in filesystem.
   ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "saving in:%s this data:%s", target_file, data_to_save.c_str());
-  if(!SPIFFS.begin(true)) {
-    error_logger("Ocurrió un error al ejecutar SPIFFS.");
-  }
 
   File f = SPIFFS.open(target_file, "w");
   if (!f){
@@ -240,59 +232,93 @@ void save_data_in_fs(String data_to_save, const char *target_file) {
 }
 
 //esp-now functions.
-// función que actualiza la lista de pares guardada en el SPIFFS.
-void update_peer_list_in_fs(String new_pl_data) {
 
-  info_logger("updating peer info in filesystem.");
-  String current_pl = load_data_from_fs("/Peer.txt");
-  JsonDocument current_json_pl;
-  JsonDocument new_json_pl_data;
-  String output_string;
-  DeserializationError error = deserializeJson(current_json_pl, current_pl);
-  DeserializationError error_1 = deserializeJson(new_json_pl_data, new_pl_data);
+//get device id from mac address.
+String print_device_serial(const uint8_t * mac_addr) {
+  char mac_str[18];
+  snprintf(mac_str, sizeof(mac_str), "%02x%02x%02x%02x%02x%02x",
+           mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+  // return mac_str;
+  String str = (char*) mac_str;
+  return str;
+}
+
+// print mac address.
+String print_device_mac(const uint8_t * mac_addr) {
+  char mac_str[18];
+  snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+           mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+  // return mac_str;
+  String str = (char*) mac_str;
+  return str;
+}
+
+//- mac address parser
+void parse_mac_address(const char* str, char sep, byte* bytes, int maxBytes, int base) {
+    for (int i = 0; i < maxBytes; i++) {
+        bytes[i] = strtoul(str, NULL, base);  // Convert byte
+        str = strchr(str, sep);               // Find next separator
+        if (str == NULL || *str == '\0') {
+            break;                            // No more separators, exit
+        }
+        str++;                                // Point to next character after separator
+    }
+}
+
+// función que actualiza la lista de pares guardada en el SPIFFS.
+// str_data info comming from mqtt broker as a json doc.
+void update_peer_list_in_fs(String received_data) {
+
+  info_logger("updating peer info in the filesystem.");
+  JsonDocument json;
+  String output_data;
+  DeserializationError error = deserializeJson(json, received_data);
 
   if (error)
   {
     ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "current_json_pl Deserialization error raised with code: %s", error.c_str());
     return;
   } 
-  else if (error_1) 
-  {
-    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "new_json_pl Deserialization error raised with code: %s", error_1.c_str());
-    return;
-  }
+  //get data
+  const char *controller_address = json["controller"] | "null";
+  const char *monitor01_address = json["monitor_01"] | "null";
+  const char *monitor02_address = json["monitor_02"] | "null";
+  uint8_t buffer[6];
 
-  const char *controller_mac = new_json_pl_data["controller"] | "null";
-  const char *monitor_01_mac = new_json_pl_data["monitor_01"] | "null";
-  const char *monitor_02_mac = new_json_pl_data["monitor_02"] | "null";
-
-  if (strcmp(controller_mac, "null") != 0) //don't match
+  if (strcmp(controller_address, "null") != 0) //don't match
   {
     info_logger("new mac address for controller received!");
-    current_json_pl["controller"] = controller_mac;
+    debug_logger(controller_address);
+    parse_mac_address(controller_address, '.', buffer, 6, 16);
+    json["controller"] = print_device_mac(buffer);
   }
-  if (strcmp(monitor_01_mac, "null") != 0) //don't match
+
+  if (strcmp(monitor01_address, "null") != 0) //don't match
   {
     info_logger("new mac address for monitor_01 received!");
-    current_json_pl["monitor_01"] = monitor_01_mac;
+    debug_logger(monitor01_address);
+    parse_mac_address(monitor01_address, ',', buffer, 6, 16);
+    json["monitor_01"] = print_device_mac(buffer);
   }
 
-  if (strcmp(monitor_02_mac, "null") != 0) //don't match
+  if (strcmp(monitor02_address, "null") != 0) //don't match
   {
     info_logger("new mac address for monitor_02 received!");
-    current_json_pl["monitor_02"] = monitor_02_mac;
+    debug_logger(monitor02_address);
+    parse_mac_address(monitor02_address, '.', buffer, 6, 16);
+    json["monitor_02"] = print_device_mac(buffer);
   }
 
-  //serialize new data.
-  serializeJson(current_json_pl, output_string);
-  save_data_in_fs(output_string, "/Peer.txt");
+  //save data.
+  serializeJson(json, output_data);
+  save_data_in_fs(output_data, "/Peer.txt");
 
   return;
 }
 
 // función que verifica que la dirección mac solicitada está guardada en spiffs.
 // y devuelve el rol del dispositivo.
-PeerRoleID get_peer_role_from_fs(String target_dev_id){
+PeerRoleID get_peer_role_from_fs(const char * target_dev_id){
   //-
   String peer_list = load_data_from_fs("/Peer.txt");
   JsonDocument json_doc;
@@ -305,19 +331,19 @@ PeerRoleID get_peer_role_from_fs(String target_dev_id){
   }
 
   const char * controller_mac_saved = json_doc["controller"] | "null";
-  if (strcmp(controller_mac_saved, target_dev_id.c_str()) == 0){
+  if (strcmp(controller_mac_saved, target_dev_id) == 0){
     info_logger("device found as controller.");
     return CONTROLLER;
   }
 
   const char * monitor_01_mac_saved = json_doc["monitor_01"] | "null";
-  if (strcmp(monitor_01_mac_saved, target_dev_id.c_str()) == 0){
+  if (strcmp(monitor_01_mac_saved, target_dev_id) == 0){
     info_logger("device found as monitor_01");
     return MONITOR_A;
   }
 
   const char * monitor_02_mac_saved = json_doc["monitor_02"] | "null";
-  if (strcmp(monitor_02_mac_saved, target_dev_id.c_str()) == 0){
+  if (strcmp(monitor_02_mac_saved, target_dev_id) == 0){
     info_logger("device found as monitor_02");
     return MONITOR_B;
   }
@@ -325,16 +351,6 @@ PeerRoleID get_peer_role_from_fs(String target_dev_id){
   info_logger("device not found in SPIFFS!");
   return UNSET;
 
-}
-
-// get device id from device mac address.
-String get_device_id(const uint8_t * mac_addr) {
-  char mac_str[18];
-  snprintf(mac_str, sizeof(mac_str), "%02x%02x%02x%02x%02x%02x",
-           mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
-  // return mac_str;
-  String str = (char*) mac_str;
-  return str;
 }
 
 // add peer to peer list.
@@ -381,16 +397,16 @@ bool add_peer_to_plist(const uint8_t *peer_addr) {      // add pairing
 
 // callback when data is sent
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
-  String device_id = get_device_id(mac_addr);
+  String device_serial = print_device_serial(mac_addr);
 
   switch (status)
   {
   case ESP_NOW_SEND_SUCCESS:
-    ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] packet to: %s has been sent!", device_id.c_str());
+    ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] packet to: %s has been sent!", device_serial.c_str());
     break;
   
   default:
-  ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[esp-now] packet to: %s not sent.", device_id.c_str());
+  ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[esp-now] packet to: %s not sent.", device_serial.c_str());
     break;
   }
 }
@@ -403,9 +419,9 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len)
     return;
   }
 
-  String device_id = get_device_id(mac_addr);
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] %d bytes of data received from: %s", len, device_id.c_str());
-  PeerRoleID device_role_in_fs = get_peer_role_from_fs(device_id);
+  const char *device_serial = print_device_serial(mac_addr).c_str();
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] %d bytes of data received from: %s", len, device_serial);
+  PeerRoleID device_role_in_fs = get_peer_role_from_fs(device_serial);
   
   // to enable devices to communicate with the server, the user must send a mqtt message with the mac address and the role
   // of the device. Only then, the server can process messages from that mac address.
@@ -1198,7 +1214,7 @@ void wifiloop() //[ok]
       info_logger("[mqtt] MQTT broker connection attempt..");
       lastMqttReconnect = millis();
       String client_id = "ac-hub-";
-      client_id += hubDeviceID;
+      client_id += hub_device_serial;
       ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[mqtt] client id: %s", client_id.c_str());
       digitalWrite(NETWORK_LED, HIGH); //led pulse begin...
       // Try mqtt connection to the broker.
@@ -1368,7 +1384,7 @@ void notify_state_update_to_broker()
   doc["value"] = "stateNotification";
   doc["metadata"]["systemPrevState"] = PrevSysState;
   doc["metadata"]["systemNewState"] = SysState;
-  doc["metadata"]["deviceID"] = hubDeviceID;
+  doc["metadata"]["deviceID"] = hub_device_serial;
   serializeJson(doc, message);
 
   PrevSysState = SysState; // assign PrevSysState the current SysState
@@ -1396,7 +1412,7 @@ void send_data_to_broker() //[ok]
 
   doc["variable"] = "ac-hub";
   doc["value"] = tdecimal;
-  doc["metadata"]["deviceID"] = hubDeviceID;
+  doc["metadata"]["deviceID"] = hub_device_serial;
   doc["metadata"]["hub"][0] = SysState;
   doc["metadata"]["hub"][1] = SysMode;
   doc["metadata"]["hub"][2] = radarState;
@@ -1530,6 +1546,13 @@ void setup()
   }
   info_logger("RTC ok.");
 
+  info_logger("SPIFFS configuration.");
+  if(!SPIFFS.begin(true)) {
+    error_logger("Ocurrió un error al ejecutar SPIFFS. please reboot.");
+    while(1){;}
+  }
+  info_logger("SPIFFS ok.");
+
   // Inicio Sensores OneWire
   info_logger("OneWire sensors configuration!");
   ambient_t_sensor.begin();
@@ -1553,17 +1576,17 @@ void setup()
   // WifiSettings
   info_logger("WiFi settings and config.");
   WiFi.onEvent(WiFiEvent);
-  WiFi.mode(WIFI_AP);
+  WiFi.mode(WIFI_STA);
   WiFi.begin(esid.c_str(), epass.c_str());
   // WiFi.softAP(AP_SSID, AP_PASS, 1, 1); //channel 1, hidden ssid
   info_logger("WiFi settings ok.");
   //---------------------------------------- get device identifier
-  uint8_t hubMacAddress[6];
-  esp_err_t ret = esp_wifi_get_mac(WIFI_IF_AP, hubMacAddress);
+  uint8_t client_mac_address[6];
+  esp_err_t ret = esp_wifi_get_mac(WIFI_IF_STA, client_mac_address);
   if (ret != ESP_OK) {
     error_logger("could not read mac address.");
   }
-  hubDeviceID = get_device_id(hubMacAddress);
+  hub_device_serial = print_device_serial(client_mac_address);
   //---------------------------------------- esp_now settings
   info_logger("Setting up ESP_NOW");
   if (esp_now_init() != ESP_OK) {
