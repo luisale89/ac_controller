@@ -45,25 +45,27 @@ OneWire oneWireAmbTemp(AMB_TEMP);
 DallasTemperature ambient_t_sensor(&oneWireAmbTemp);
 
 // Time Variables
-unsigned long lastConnectionTime = 0; // last time a message was sent to the broker, in milliseconds
+unsigned long lastEspnowPost = 0;
+unsigned long lastMqttMessagePost = 0; // last time a message was sent to the broker, in milliseconds
 unsigned long lastControllerTime = 0;
 unsigned long lastSaluteTime = 0;
 unsigned long lastButtonPress = 0;
 unsigned long lastWifiReconnect = 0;
 unsigned long lastMqttReconnect = 0;
 unsigned long lastNetworkLedBlink = 0;
-unsigned long postingInterval = 1L * 60000L;   // delay between updates, in milliseconds.. 1 minute and updates later on.
-unsigned long radarStateTime = 0;
-unsigned long AutoTimeOut = 0;                           // wati time for moving sensor and setpoint change
 unsigned long lastTempRequest = 0;
 unsigned long lastRadarChange = 0;
+unsigned long radarStateTime = 0;
+unsigned long AutoTimeOut = 0;                           // wati time for moving sensor and setpoint change
+unsigned long mqttPostingInterval = 1L * 60000L;   // delay between updates, in milliseconds.. 1 minute and updates later on.
 const unsigned long radarDebounceTime = 1L * 60000L;      // 1 minute rebound for radar sensor.
 const unsigned long buttonTimeOut = 5L * 1000L;          // rebound 5seconds
-const unsigned long controllerInterval = 2L * 5000L;     // delay between sensor updates, 10 seconds
+const unsigned long controllerInterval = 1L * 5000L;     // delay between sensor updates, 5 seconds
 const unsigned long SaluteTimer = 1L * 30000L;           // Tiempo para enviar que el dispositivo esta conectado,
 const unsigned long wifiReconnectInterval = 5L * 60000L;  // 5 minutos para intentar reconectar al wifi.
 const unsigned long mqttReconnectInterval = 1L * 10000L; // 10 segundos para intentar reconectar al broker mqtt.
 const unsigned long wifiDisconnectedLedInterval = 250;        // 250 ms
+const unsigned long espnowPostingInterval = 10000L; // 10 seconds for espnow message post.
 
 // MQTT Broker
 const char *mqtt_broker = TEST_MQTT_BROKER;
@@ -74,7 +76,9 @@ const char *peer_list_topic = "achub/system/espnow/peer";
 const char *mqtt_username = "Token";
 const char *mqtt_password = MQTT_PASSWORD;
 const int mqtt_port = 1883;
-bool Envio = false;
+bool postToBroker = false;
+bool postToPeers = false;
+bool postMqttStateUpdate = false;
 
 // Handler de tareas de lectura de sensores para nucleo 0 o 1
 TaskHandle_t Task1;
@@ -318,7 +322,7 @@ void update_peer_list_in_fs(String received_data) {
 
 // función que verifica que la dirección mac solicitada está guardada en spiffs.
 // y devuelve el rol del dispositivo.
-PeerRoleID get_peer_role_from_fs(const char * target_dev_id){
+PeerRoleID get_peer_role_from_fs(const char * target_mac_address){
   //-
   String peer_list = load_data_from_fs("/Peer.txt");
   JsonDocument json_doc;
@@ -331,19 +335,19 @@ PeerRoleID get_peer_role_from_fs(const char * target_dev_id){
   }
 
   const char * controller_mac_saved = json_doc["controller"] | "null";
-  if (strcmp(controller_mac_saved, target_dev_id) == 0){
-    info_logger("device found as controller.");
+  if (strcmp(controller_mac_saved, target_mac_address) == 0){
+    debug_logger("device found as controller.");
     return CONTROLLER;
   }
 
   const char * monitor_01_mac_saved = json_doc["monitor_01"] | "null";
-  if (strcmp(monitor_01_mac_saved, target_dev_id) == 0){
+  if (strcmp(monitor_01_mac_saved, target_mac_address) == 0){
     info_logger("device found as monitor_01");
     return MONITOR_A;
   }
 
   const char * monitor_02_mac_saved = json_doc["monitor_02"] | "null";
-  if (strcmp(monitor_02_mac_saved, target_dev_id) == 0){
+  if (strcmp(monitor_02_mac_saved, target_mac_address) == 0){
     info_logger("device found as monitor_02");
     return MONITOR_B;
   }
@@ -368,7 +372,7 @@ bool add_peer_to_plist(const uint8_t *peer_addr) {      // add pairing
   slaveTemplate.encrypt = 0; // no encryption
 
   // check if the peer exists and remove it from peerlist
-  bool exists = esp_now_is_peer_exist(slaveTemplate.peer_addr);
+  bool exists = esp_now_is_peer_exist(peer_addr);
   if (exists) {
     // Slave already paired.
     info_logger("peer already exists, deleting existing data.");
@@ -379,18 +383,20 @@ bool add_peer_to_plist(const uint8_t *peer_addr) {      // add pairing
       error_logger("error deleting peer!");
       return false;
     }
+  } else {
+    info_logger("new peer to be saved in the peer list..");
   }
 
   // save peer in peerlist
-  esp_err_t addPeerResult = esp_now_add_peer(peer);
-  switch (addPeerResult)
+  esp_err_t result = esp_now_add_peer(peer);
+  switch (result)
   {
   case ESP_OK:
-    info_logger("new peer added successfully");
+    info_logger("peer added successfully");
     return true;
   
   default:
-    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "Error: %d, while adding new peer.", addPeerResult);
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "Error: %s, while adding new peer.", esp_err_to_name(result));
     return false;
   }
 }
@@ -419,14 +425,14 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len)
     return;
   }
 
-  const char *device_serial = print_device_serial(mac_addr).c_str();
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] %d bytes of data received from: %s", len, device_serial);
-  PeerRoleID device_role_in_fs = get_peer_role_from_fs(device_serial);
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[esp-now] %d bytes of data received from: %s", len, print_device_serial(mac_addr).c_str());
+  //-get role ID
+  PeerRoleID device_role = get_peer_role_from_fs(print_device_mac(mac_addr).c_str());
   
   // to enable devices to communicate with the server, the user must send a mqtt message with the mac address and the role
   // of the device. Only then, the server can process messages from that mac address.
   // check 'update_peer_list_in_fs()' function for more information.
-  if (device_role_in_fs == UNSET) {
+  if (device_role == UNSET) {
     info_logger("[esp-now] device is unset in fs. Ignoring data...");
     return;
   }
@@ -443,9 +449,10 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len)
     // to.do:
     // create a condition to check if the device's role has been updated. if so, respond the message calling for a new
     // pairing process.
-    
-    if (device_role_in_fs == CONTROLLER) 
+
+    switch (device_role)
     {
+    case CONTROLLER:
       info_logger("[esp-now] message received from CONTROLLER device.");
       memcpy(&controller_data, incomingData, sizeof(controller_data));
       // create a JSON document with received data and send it by event to the web page
@@ -457,10 +464,9 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len)
       root["fault_code"] = controller_data.fault_code;
       serializeJson(root, payload);
       debug_logger(payload.c_str());
-    }
+      break;
 
-    if (device_role_in_fs == MONITOR_A)
-    {
+    case MONITOR_A:
       info_logger("[esp-now] message received from MONITOR_A device.");
       memcpy(&monitor_01, incomingData, sizeof(monitor_01));
       root["fault_code"] = monitor_01.fault_code;
@@ -475,11 +481,14 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len)
       root["comp_current"][1] = monitor_01.compressor_amps[1];
       root["comp_current"][2] = monitor_01.compressor_amps[2];
       root["compressor_state"] = monitor_01.compressor_state;
-
       serializeJson(root, payload);
       debug_logger(payload.c_str());
+      break;
+    
+    default:
+      info_logger("unknown sender role. ignoring message.");
+      break;
     }
-
     break;
   
   case PAIRING:                           
@@ -493,22 +502,17 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len)
     }
 
     pairing_data.sender_role = SERVER;    // server sending a response.
-    pairing_data.device_new_role = device_role_in_fs; // role of the receiver device, stored in filesystem.
-    pairing_data.channel = 0;  // current WiFi channel.
+    pairing_data.device_new_role = device_role; // role of the receiver device, stored in filesystem.
+    pairing_data.channel = WiFi.channel();  // current WiFi channel.
 
     if (add_peer_to_plist(mac_addr) == true){
       info_logger("[esp-now] sending response to peer with PAIRING data.");
-      esp_err_t send_result = esp_now_send(mac_addr, (uint8_t *) &pairing_data, sizeof(pairing_data));
+      esp_err_t result = esp_now_send(mac_addr, (uint8_t *) &pairing_data, sizeof(pairing_data));
 
-      switch (send_result)
-      {
-      case ESP_OK:
+      if (result == ESP_OK) {
         info_logger("[esp-now] pairing response sent.");
-        break;
-      
-      default:
-        ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[esp-now] error sending pairing msg to peer, reason: %d",  send_result);
-        break;
+      } else {
+        ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "Error sending pairing response, reason: %s",  esp_err_to_name(result));
       }
     }
   break;
@@ -521,7 +525,7 @@ void set_station_for_espnow_offline_mode() {
   info_logger("[wifi] Setting up to communicate over esp-now disconnected from the router.");
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[wifi] channel: %d", WiFi.channel());
   espnow_connection_state = ESPNOW_OFFLINE;
-  lastWifiReconnect = millis(); // set timer for reconnect to the router in 5 minutes.
+  lastWifiReconnect = millis(); // set timer for reconnect to the router
   wiFiReconnectFlag = true;
   return;
 }
@@ -606,11 +610,20 @@ void save_operation_state_in_fs() //[OK] [OK]
 void load_operation_state_from_fs() //[OK] [OK]
 {
   // operation state.
-  String ESave = load_data_from_fs("/Encendido.txt");
+  String state_loaded = load_data_from_fs("/Encendido.txt");
 
-  if (ESave == "on") {SysState = SYSTEM_ON;}
-  else if (ESave == "off") {SysState = SYSTEM_OFF;}
-  else if (ESave == "sleep") {SysState = SYSTEM_SLEEP;}
+  if (state_loaded == "on") {
+    SysState = SYSTEM_ON; 
+    info_logger("system is on..");
+  }
+  else if (state_loaded == "off") {
+    SysState = SYSTEM_OFF; 
+    info_logger("system is off");
+  }
+  else if (state_loaded == "sleep") {
+    SysState = SYSTEM_SLEEP; 
+    info_logger("system is in sleep mode.");
+  }
   else {error_logger("Error: Bad value stored in /Encendido.txt");}
 
   return;
@@ -968,7 +981,6 @@ void process_op_state_from_broker(String json) //[OK, OK]
 // Funcion que regula la temperatura
 void temp_setpoint_controller() // [OK]
 {
-  info_logger("* Exec. temp setpoint controller function");
   switch (SysMode)
   {
   case AUTO_MODE:
@@ -1044,17 +1056,16 @@ void mqtt_message_callback(char *message_topic, byte *payload, unsigned int leng
 
   // Levanta el Flag para envio de datos
   delay(100);
-  Envio = true;
+  postToBroker = true;
   digitalWrite(NETWORK_LED, HIGH);
 }
 
 //funcion que ajusta el estado del sistema en funcion del horario y otros parametros.
 void sleep_state_controller() //[OK]
 {
-  info_logger("* Excec. sleep state controller function.");
   if (!sleepControlEnabled)
   {
-    info_logger("- Schedule disabled.");
+    info_logger("- Time Control (timectrl) disabled.");
     sleep_flag = FLAG_DOWN;
     return;
   }
@@ -1069,7 +1080,9 @@ void sleep_state_controller() //[OK]
 
   if (error)
   {
-    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error raised with code: %s", error.c_str());
+    error_logger("error reading file. target file: ->");
+    error_logger(target_file.c_str());
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "JSON Deserialization error code: %s", error.c_str());
     return;
   }
 
@@ -1080,6 +1093,7 @@ void sleep_state_controller() //[OK]
   if (!SLEEP_ENABLED)
   {
     sleep_flag = FLAG_DOWN;
+    debug_logger("time control disabled for today");
     return;
   }
 
@@ -1088,12 +1102,12 @@ void sleep_state_controller() //[OK]
   String minuto = "0";
   if (Min < 10)
   {
-    info_logger("actual minute is lower than dec.10.");
+    debug_logger("actual minute is lower than dec.10.");
     minuto.concat(Min);
   }
   else
   {
-    info_logger("actual minute is equal to dec.10 or grater.");
+    debug_logger("actual minute is equal to dec.10 or grater.");
     minuto = String(Min);
   }
   String tiempo = hora + minuto;
@@ -1123,7 +1137,7 @@ void sleep_state_controller() //[OK]
     }
   }
   else
-  { // horario fuera del sleep.
+  { // horario del sleep.
     // si el sleep está apagado, o si es la primera verificación después del arranque..
     if (sleep_flag == FLAG_DOWN || sleep_flag == FLAG_UNSET)
     {
@@ -1322,17 +1336,20 @@ void update_IO() //[ok]
 void send_data_to_peers()
 {
   //-
+  const unsigned long current = millis();
+  if (espnow_connection_state == ESPNOW_IDLE) {return;}
+  //- check if its time to send a message to the peers
+  if (current - lastEspnowPost > espnowPostingInterval) {postToPeers = true;}
+  if (!postToPeers){return;}
+
+  info_logger("[esp-now] sending message to esp-now peers.");
   esp_now_peer_num number_of_peers;
   esp_now_get_peer_num(&number_of_peers);
   if (number_of_peers.total_num == 0)
   {
     info_logger("[esp-now] peer list is empty. no message sent!");
-    return;
-  }
-
-  if (espnow_connection_state == ESPNOW_IDLE)
-  {
-    info_logger("[esp-now] connection state idle, no message sent!");
+    postToPeers = false;
+    lastEspnowPost = current;
     return;
   }
 
@@ -1345,36 +1362,24 @@ void send_data_to_peers()
   settings_data.room_temp = ambient_temp;
 
   // send data to peers.
-  esp_err_t send_result = esp_now_send(NULL, (uint8_t *) &settings_data, sizeof(settings_data));
+  esp_err_t result = esp_now_send(NULL, (uint8_t *) &settings_data, sizeof(settings_data));
 
-  switch (send_result)
-  {
-  case ESP_OK:
-    info_logger("[esp-now] settings sent.");
-    break;
-  
-  default:
-    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[esp-now] error sending pairing msg to peer, reason: %d",  send_result);
-    break;
+  if (result == ESP_OK) {
+    info_logger("[esp-now] settings message sent.");
+  } else {
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[esp-now] error sending msg, reason: %s",  esp_err_to_name(result));
   }
 
+  postToPeers = false;
+  lastEspnowPost = current;
+  //-
   return;
 }
 
 //notifica al broker el cambio de estado del sistema.
 void notify_state_update_to_broker()
-{
-  if (PrevSysState == SysState)
-  {
-    return;
-  }
-
-  // update sysState to the peers.
-  send_data_to_peers();
-
-  if (!mqtt_client.connected())
-  {
-    info_logger("mqtt client disconnected, state update could not be sent.");
+{ 
+  if (!postMqttStateUpdate) {
     return;
   }
 
@@ -1387,26 +1392,29 @@ void notify_state_update_to_broker()
   doc["metadata"]["deviceID"] = hub_device_serial;
   serializeJson(doc, message);
 
-  PrevSysState = SysState; // assign PrevSysState the current SysState
-  save_operation_state_in_fs();
-
   info_logger("Notifying MQTT broker on System State update..");
   // sending message.
   bool message_sent = mqtt_client.publish("achub/device/stateNotification", message.c_str());
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "MQTT publish result: %s", message_sent ? "message sent!" : "fail");
+
+  postMqttStateUpdate = false;
   return;
 }
 
 // Envio de datos recurrente al broker mqtt
 void send_data_to_broker() //[ok]
 {
-  if (!Envio || !mqtt_client.connected())
-  {
-    return;
-  }
+  if (!mqtt_client.connected()){return;}
 
+  notify_state_update_to_broker();
+
+  // check if its time to post a message.
+  if (millis() - lastMqttMessagePost > mqttPostingInterval) {postToBroker = true;}
+  if (!postToBroker){return;}
+
+  // advance with the mqtt post.
   double tdecimal = (int)(ambient_temp * 100 + 0.5) / 100.0;
-  // json todas las variables, falta recoleccion
+  // json todas las variables.
   String output;
   JsonDocument doc;
 
@@ -1421,7 +1429,7 @@ void send_data_to_broker() //[ok]
   doc["metadata"]["hub"][5] = activeSetpoint;
 
   serializeJson(doc, output);
-  info_logger("Publishing system variables to mqtt broker.");
+  info_logger("Publishing hub variables.");
   bool mqtt_msg_sent = mqtt_client.publish("achub/tago/data/post", output.c_str());
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "MQTT publish result: %s", mqtt_msg_sent ? "message sent!" : "fail");
 
@@ -1429,17 +1437,68 @@ void send_data_to_broker() //[ok]
   switch (SysState)
   {
   case SYSTEM_ON:
-    postingInterval = 2L * 30000L; // 1 minuto.
+    mqttPostingInterval = 2L * 30000L; // 1 minuto.
     break;
   
   default:
-    postingInterval = 5L * 60000L; // 5 minutos.
+    mqttPostingInterval = 5L * 60000L; // 5 minutos.
     break;
   }
 
-  Envio = false;
-  lastConnectionTime = millis();
+  postToBroker = false;
+  lastMqttMessagePost = millis();
 }
+
+void log_system_state() {
+
+  // logging
+  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Radar State: %s", radarState ? "Detecting": "Empty room");
+  switch (SysState)
+  {
+  case SYSTEM_ON:
+    info_logger("System State: RUNNING");
+    break;
+  
+  case SYSTEM_OFF:
+    info_logger("System State: OFF");
+    break;
+
+  case SYSTEM_SLEEP:
+    info_logger("System State: SLEEP");
+    break;
+  }
+  // SysMode feedback.
+  switch (SysMode)
+  {
+  case AUTO_MODE:
+    info_logger("System Mode: AUTO");
+    break;
+
+  case COOL_MODE:
+    info_logger("System Mode: COOL");
+    break;
+
+  case FAN_MODE:
+    info_logger("System Mode: FAN");
+    break;
+  }
+}
+
+void check_for_updates_to_post() {
+
+  // if there is no change
+  if (PrevSysState != SysState)
+  {
+    info_logger("System state has changed. sending updates.");
+    PrevSysState = SysState; // assign PrevSysState the current SysState
+    save_operation_state_in_fs();
+    postToPeers = true; // post to espnow peers.
+    postMqttStateUpdate = true; // post to the broker.
+    return;
+  }
+  return;
+}
+
 
 // Hace la lectura y envio de datos.
 void sensors_read(void *pvParameters)
@@ -1456,57 +1515,20 @@ void sensors_read(void *pvParameters)
       sleep_state_controller();
       // Funcion que regula latemperatura segun el modo (Cool, auto, fan)
       temp_setpoint_controller();
-      // Envía las configuraciones a los pares esp-now.
-      send_data_to_peers();
-
-      // logging
-      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Radar State: %s", radarState ? "Detecting": "Empty room");
-      switch (SysState)
-      {
-      case SYSTEM_ON:
-        info_logger("System State: RUNNING");
-        break;
-      
-      case SYSTEM_OFF:
-        info_logger("System State: OFF");
-        break;
-
-      case SYSTEM_SLEEP:
-        info_logger("System State: SLEEP");
-        break;
-      }
-      // SysMode feedback.
-      switch (SysMode)
-      {
-      case AUTO_MODE:
-        info_logger("System Mode: AUTO");
-        break;
-
-      case COOL_MODE:
-        info_logger("System Mode: COOL");
-        break;
-
-      case FAN_MODE:
-        info_logger("System Mode: FAN");
-        break;
-      }
-
+      //serial log.
+      log_system_state();
       // update time var
       lastControllerTime = millis();
     }
 
-    // flag to send data to tago.io
-    if (millis() - lastConnectionTime > postingInterval)
-    {
-      Envio = true;
-    }
-
     // Update inputs and outputs
     update_IO();
-    //notify the user about state update...
-    notify_state_update_to_broker();
-    //send all the sensor data to the mqtt broker
+    // check if is required to post data to the broker or to the peers.
+    check_for_updates_to_post();
+    // send all the sensor data to the mqtt broker
     send_data_to_broker();
+    // Envía las configuraciones a los pares esp-now.
+    send_data_to_peers();
 
     // task delay
     vTaskDelay(xDelay);
@@ -1576,7 +1598,7 @@ void setup()
   // WifiSettings
   info_logger("WiFi settings and config.");
   WiFi.onEvent(WiFiEvent);
-  WiFi.mode(WIFI_STA);
+  WiFi.mode(WIFI_AP_STA);
   WiFi.begin(esid.c_str(), epass.c_str());
   // WiFi.softAP(AP_SSID, AP_PASS, 1, 1); //channel 1, hidden ssid
   info_logger("WiFi settings ok.");
