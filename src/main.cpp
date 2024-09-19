@@ -1437,6 +1437,7 @@ void send_data_to_broker() //[ok]
   doc["variable"] = "ac-hub";
   doc["value"] = SysState;
   doc["metadata"]["sn"] = hub_device_serial;
+  doc["metadata"]["RSSI"] = WiFi.RSSI();
   doc["metadata"]["room_t"] = ambient_temp;
   doc["metadata"]["sys_mode"] = SysMode;
   doc["metadata"]["presence"] = radarState;
