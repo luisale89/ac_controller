@@ -27,9 +27,6 @@ const bool willRetain = false;
 const char willMessage[] = "disconnected";
 uint16_t mqttBufferSize = 768; // LuisLucena, bufferSize in bytes
 
-// Variables
-int network_led_state = LOW;
-
 // pinout
 #define NETWORK_LED 2
 #define RADAR 26
@@ -56,9 +53,9 @@ unsigned long lastNetworkLedBlink = 0;
 unsigned long lastTempRequest = 0;
 unsigned long lastRadarChange = 0;
 unsigned long radarStateTime = 0;
-unsigned long AutoTimeOut = 0;                           // wati time for moving sensor and setpoint change
+unsigned long AutoTimeOut = 0;                           // wait time for moving sensor and setpoint change
 unsigned long mqttPostingInterval = 1L * 60000L;   // delay between updates, in milliseconds.. 1 minute and updates later on.
-const unsigned long radarDebounceTime = 1L * 60000L;      // 1 minute rebound for radar sensor.
+const unsigned long radarDebounceTime = 1L * 60000L;     // 1 minute rebound for radar sensor.
 const unsigned long buttonTimeOut = 5L * 1000L;          // rebound 5seconds
 const unsigned long controllerInterval = 1L * 5000L;     // delay between sensor updates, 5 seconds
 const unsigned long SaluteTimer = 1L * 30000L;           // Tiempo para enviar que el dispositivo esta conectado,
@@ -108,22 +105,25 @@ enum SleepWakeCondition {SLEEP_ON_TIME, SLEEP_ON_ABSENCE, WAKE_ON_TIME, WAKE_ON_
 // Enum vars
 SysStateEnum SysState = UNKN;
 SysStateEnum PrevSysState = UNKN;
+SysStateEnum StoredSysState = UNKN;
 SysModeEnum SysMode = AUTO_MODE;
 FlowFlag sleep_flag = FLAG_UNSET;
 SleepWakeCondition sleep_condition = SLEEP_ON_TIME;
 SleepWakeCondition wake_condition = WAKE_ON_TIME;
 
-//--
+// Variables
+int network_led_state = LOW;
+int tempSensorResolution = 12; //bits
+int tempRequestDelay = 0;
 float userSetpoint;
 float AutoSetpoint;
 float activeSetpoint;
+float ambient_temp = 22;
 bool Salute = false;
 bool radarState = false;
 bool lastRadarState = false;
 bool sleepControlEnabled; // Variables de activacion del modo sleep
-double ambient_temp = 22;
-int tempSensorResolution = 12; //bits
-int tempRequestDelay = 0;
+
 
 // NTP
 const char *ntpServer = "pool.ntp.org";
@@ -132,13 +132,20 @@ const int daylightOffset_sec = 0;
 
 // ESP-NOW VARS
 esp_now_peer_info_t slaveTemplate;
+bool controller_online = false;
+bool monitor_01_online = false;
+bool monitor_02_online = false;
+uint32_t controller_not_rspnd_count = 0;
+uint32_t monitor_01_not_respnd_count = 0;
+uint32_t monitor_02_not_respnd_count = 0;
+const uint16_t MAX_NOT_RSPND_TO_OFFLINE = 10; // 10 messages not received.
+
+//-enums
 enum MessageTypeEnum {PAIRING, DATA,};
 enum PeerRoleID {SERVER, CONTROLLER, MONITOR_A, MONITOR_B, UNSET};
 enum EspNowState {ESPNOW_OFFLINE, ESPNOW_ONLINE, ESPNOW_IDLE,};
 EspNowState espnow_connection_state = ESPNOW_IDLE;
-// MessageTypeEnum espnow_msg_type;
-// SystemModes espnow_system_mode;
-// PeerRoleID espnow_peer_id;
+
 typedef struct pairing_data_struct {
   MessageTypeEnum msg_type;     // (1 byte)
   PeerRoleID sender_role;       // (1 byte)
@@ -151,7 +158,7 @@ typedef struct controller_data_struct {
   PeerRoleID sender_role;  // (1 byte)
   uint8_t fault_code;      // (1 byte)
   float air_return_temp;   // (4 bytes) [°C]
-  float air_inyect_temp;   // (4 bytes) [°C]
+  float air_supply_temp;   // (4 bytes) [°C]
   bool drain_switch;       // (1 byte)
   bool cooling_relay;      // (1 byte)
   bool turbine_relay;      // (1 byte)
@@ -437,12 +444,10 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len)
     return;
   }
 
-  JsonDocument root;
-  String payload;
   uint8_t message_type = incomingData[0];       // first message byte is the type of message 
 
   switch (message_type) {
-  case DATA:                           
+  case DATA:
   // the message is data type
     info_logger("[esp-now] message of type DATA arrived.");
 
@@ -454,35 +459,27 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len)
     {
     case CONTROLLER:
       info_logger("[esp-now] message received from CONTROLLER device.");
+      controller_online = true; // set to true when receives a message from the device.
+      controller_not_rspnd_count = 0; //resets the counter.
+      //- sets global variable.
       memcpy(&controller_data, incomingData, sizeof(controller_data));
-      // create a JSON document with received data and send it by event to the web page
-      root["air_return_temp"] = controller_data.air_return_temp;
-      root["air_inyect_temp"] = controller_data.air_inyect_temp;
-      root["cooling_relay"] = controller_data.cooling_relay;
-      root["turbine_relay"] = controller_data.turbine_relay;
-      root["drain_switch"] = controller_data.drain_switch;
-      root["fault_code"] = controller_data.fault_code;
-      serializeJson(root, payload);
-      debug_logger(payload.c_str());
+      //-breaks
       break;
 
     case MONITOR_A:
       info_logger("[esp-now] message received from MONITOR_A device.");
+      monitor_01_online = true;
+      monitor_01_not_respnd_count = 0;
       memcpy(&monitor_01, incomingData, sizeof(monitor_01));
-      root["fault_code"] = monitor_01.fault_code;
-      root["vapor_temp"] = monitor_01.vapor_temp;
-      root["low_pressure"][0] = monitor_01.low_pressure[0];
-      root["low_pressure"][1] = monitor_01.low_pressure[1];
-      root["low_pressure"][2] = monitor_01.low_pressure[2];
-      root["discharge_temp"] = monitor_01.discharge_temp;
-      root["condenser_temp"] = monitor_01.condenser_temp;
-      root["liquid_temp"] = monitor_01.liquid_temp;
-      root["comp_current"][0] = monitor_01.compressor_amps[0];
-      root["comp_current"][1] = monitor_01.compressor_amps[1];
-      root["comp_current"][2] = monitor_01.compressor_amps[2];
-      root["compressor_state"] = monitor_01.compressor_state;
-      serializeJson(root, payload);
-      debug_logger(payload.c_str());
+      //-breaks
+      break;
+
+    case MONITOR_B:
+      info_logger("[esp-now] message received from MONITOR_B device");
+      monitor_02_online = true;
+      monitor_02_not_respnd_count = 0;
+      memcpy(&monitor_02, incomingData, sizeof(monitor_02));
+      //-breaks
       break;
     
     default:
@@ -988,7 +985,6 @@ void temp_setpoint_controller() // [OK]
       radarStateTime = millis();
     }
     if (millis() - radarStateTime > AutoTimeOut) {
-      info_logger("system Temp. adjust = 'AutoSetpoint'");
       activeSetpoint = AutoSetpoint;
     } else {
       activeSetpoint = userSetpoint;
@@ -1006,7 +1002,6 @@ void temp_setpoint_controller() // [OK]
     break;
 
   }
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "System Temp. value: %2.1f", activeSetpoint);
 }
 
 // Funcion que recibe la data de Tago por MQTT
@@ -1041,8 +1036,6 @@ void mqtt_message_callback(char *message_topic, byte *payload, unsigned int leng
     // Ajusta la temperatura del ambiente
     info_logger("processing temp. setpoint received from broker");
     process_temp_sp_from_broker(Mensaje);
-    //update system temp setpoint.
-    temp_setpoint_controller();
   }
   else if (strcmp(message_topic, peer_list_topic) == 0)
   {
@@ -1102,18 +1095,14 @@ void sleep_state_controller() //[OK]
   String minuto = "0";
   if (Min < 10)
   {
-    debug_logger("actual minute is lower than dec.10.");
     minuto.concat(Min);
   }
   else
   {
-    debug_logger("actual minute is equal to dec.10 or grater.");
     minuto = String(Min);
   }
   String tiempo = hora + minuto;
   ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "Current Time: %s", tiempo);
-  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "Wake Up at: %i", WAKE_TIME);
-  ESP_LOG_LEVEL(ESP_LOG_DEBUG, TAG, "Sleep at: %i", SLEEP_TIME);
 
   if (SLEEP_TIME > tiempo.toInt() && WAKE_TIME < tiempo.toInt()) // horario para el sleep...
   {
@@ -1166,14 +1155,14 @@ void update_ambient_temperature() // defining
   if (millis() - lastTempRequest >= tempRequestDelay) {
     //-
     double AmbTempBuffer = ambient_t_sensor.getTempCByIndex(0);
-    ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Ambient temperature: %3.2f °C", AmbTempBuffer);
-    if (AmbTempBuffer == -127)
+    if (AmbTempBuffer != -127)
     {
+      ambient_temp = AmbTempBuffer;
+    } else {
       error_logger("Error reading OneWire sensor - [Ambient temperature]");
-      return;
+
     }
     // update global variable.
-    ambient_temp = AmbTempBuffer;
     ambient_t_sensor.requestTemperatures();
     lastTempRequest = millis();
   }
@@ -1372,6 +1361,32 @@ void send_data_to_peers()
 
   postToPeers = false;
   lastEspnowPost = current;
+
+  if (controller_online) {
+    controller_not_rspnd_count ++; //increase by one
+    //- check if the max is reached.
+    if (controller_not_rspnd_count >= MAX_NOT_RSPND_TO_OFFLINE) {
+      debug_logger("controller device is offline.");
+      controller_online = false; // after not receive max_number, the device is offline.
+    }
+  }
+
+  if (monitor_01_online) {
+    monitor_01_not_respnd_count ++;
+    if (monitor_01_not_respnd_count >= MAX_NOT_RSPND_TO_OFFLINE) {
+      debug_logger("monitor_01 device is offline.");
+      monitor_01_online = false;
+    }
+  }
+
+  if (monitor_02_online) {
+    monitor_02_not_respnd_count ++;
+    if (monitor_02_not_respnd_count >= MAX_NOT_RSPND_TO_OFFLINE) {
+      debug_logger("monitor_02 device is offline.");
+      monitor_02_online = false;
+    }
+  }
+
   //-
   return;
 }
@@ -1386,10 +1401,10 @@ void notify_state_update_to_broker()
   String message;
   JsonDocument doc;
   doc["variable"] = "ac-hub";
-  doc["value"] = "stateNotification";
-  doc["metadata"]["systemPrevState"] = PrevSysState;
-  doc["metadata"]["systemNewState"] = SysState;
-  doc["metadata"]["deviceID"] = hub_device_serial;
+  doc["value"] = "state_notification";
+  doc["metadata"]["system_prev_state"] = StoredSysState;
+  doc["metadata"]["system_new_state"] = SysState;
+  doc["metadata"]["did"] = hub_device_serial;
   serializeJson(doc, message);
 
   info_logger("Notifying MQTT broker on System State update..");
@@ -1404,6 +1419,7 @@ void notify_state_update_to_broker()
 // Envio de datos recurrente al broker mqtt
 void send_data_to_broker() //[ok]
 {
+  // if there is no internet connection 
   if (!mqtt_client.connected()){return;}
 
   notify_state_update_to_broker();
@@ -1419,14 +1435,28 @@ void send_data_to_broker() //[ok]
   JsonDocument doc;
 
   doc["variable"] = "ac-hub";
-  doc["value"] = tdecimal;
-  doc["metadata"]["deviceID"] = hub_device_serial;
-  doc["metadata"]["hub"][0] = SysState;
-  doc["metadata"]["hub"][1] = SysMode;
-  doc["metadata"]["hub"][2] = radarState;
-  doc["metadata"]["hub"][3] = sleepControlEnabled;
-  doc["metadata"]["hub"][4] = userSetpoint;
-  doc["metadata"]["hub"][5] = activeSetpoint;
+  doc["value"] = SysState;
+  doc["metadata"]["sn"] = hub_device_serial;
+  doc["metadata"]["room_t"] = ambient_temp;
+  doc["metadata"]["sys_mode"] = SysMode;
+  doc["metadata"]["presence"] = radarState;
+  doc["metadata"]["timectrl"] = sleepControlEnabled;
+  doc["metadata"]["user_sp"] = userSetpoint;
+  doc["metadata"]["active_sp"] = activeSetpoint;
+  doc["metadata"]["controller"][0] = controller_online;
+  doc["metadata"]["monitor_01"][0] = monitor_01_online;
+  doc["metadata"]["monitor_02"][0] = monitor_02_online;
+
+  if (controller_online) {
+    doc["metadata"]["controller"][1] = controller_data.air_supply_temp;
+    doc["metadata"]["controller"][2] = controller_data.air_return_temp;
+    doc["metadata"]["controller"][3] = controller_data.cooling_relay;
+    doc["metadata"]["controller"][4] = controller_data.turbine_relay;
+    doc["metadata"]["controller"][5] = controller_data.drain_switch;
+  }
+
+  // if controller is online then ->
+  //doc["metadata"]["controller"][1] = compressor_relay; ...
 
   serializeJson(doc, output);
   info_logger("Publishing hub variables.");
@@ -1449,39 +1479,27 @@ void send_data_to_broker() //[ok]
   lastMqttMessagePost = millis();
 }
 
-void log_system_state() {
+void system_log() {
 
-  // logging
-  ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "Radar State: %s", radarState ? "Detecting": "Empty room");
-  switch (SysState)
-  {
-  case SYSTEM_ON:
-    info_logger("System State: RUNNING");
-    break;
+  JsonDocument root;
+  String doc;
+  const unsigned long current_millis = millis();
   
-  case SYSTEM_OFF:
-    info_logger("System State: OFF");
-    break;
+  // logging
+  root["room_t"] = ambient_temp;
+  root["sys_mode"] = SysMode;
+  root["presence"] = radarState;
+  root["timectrl"] = sleepControlEnabled;
+  root["user_sp"] = userSetpoint;
+  root["active_sp"] = activeSetpoint;
+  root["ctrllr"][0] = controller_online;
+  root["moni_01"][0] = monitor_01_online;
+  root["moni_02"][0] = monitor_02_online;
+  //- output
+  serializeJson(root, doc);
+  debug_logger(doc.c_str());
 
-  case SYSTEM_SLEEP:
-    info_logger("System State: SLEEP");
-    break;
-  }
-  // SysMode feedback.
-  switch (SysMode)
-  {
-  case AUTO_MODE:
-    info_logger("System Mode: AUTO");
-    break;
-
-  case COOL_MODE:
-    info_logger("System Mode: COOL");
-    break;
-
-  case FAN_MODE:
-    info_logger("System Mode: FAN");
-    break;
-  }
+  return;
 }
 
 void check_for_updates_to_post() {
@@ -1490,6 +1508,7 @@ void check_for_updates_to_post() {
   if (PrevSysState != SysState)
   {
     info_logger("System state has changed. sending updates.");
+    StoredSysState = PrevSysState;
     PrevSysState = SysState; // assign PrevSysState the current SysState
     save_operation_state_in_fs();
     postToPeers = true; // post to espnow peers.
@@ -1515,8 +1534,8 @@ void sensors_read(void *pvParameters)
       sleep_state_controller();
       // Funcion que regula latemperatura segun el modo (Cool, auto, fan)
       temp_setpoint_controller();
-      //serial log.
-      log_system_state();
+      // system log variables.
+      system_log();
       // update time var
       lastControllerTime = millis();
     }
