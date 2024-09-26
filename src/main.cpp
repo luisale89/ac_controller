@@ -133,16 +133,14 @@ const int daylightOffset_sec = 0;
 // ESP-NOW VARS
 esp_now_peer_info_t slaveTemplate;
 bool controller_online = false;
-bool monitor_01_online = false;
-bool monitor_02_online = false;
+bool monitor_online = false;
 uint32_t controller_not_rspnd_count = 0;
-uint32_t monitor_01_not_respnd_count = 0;
-uint32_t monitor_02_not_respnd_count = 0;
+uint32_t monitor_not_rspnd_count = 0;
 const uint16_t MAX_NOT_RSPND_TO_OFFLINE = 10; // 10 messages not received.
 
 //-enums
 enum MessageTypeEnum {PAIRING, DATA,};
-enum PeerRoleID {SERVER, CONTROLLER, MONITOR_A, MONITOR_B, UNSET};
+enum PeerRoleID {SERVER, CONTROLLER, MONITOR, UNSET};
 enum EspNowState {ESPNOW_OFFLINE, ESPNOW_ONLINE, ESPNOW_IDLE,};
 EspNowState espnow_connection_state = ESPNOW_IDLE;
 
@@ -161,22 +159,23 @@ typedef struct controller_data_struct {
   float air_supply_temp;   // (4 bytes) [°C]
   bool drain_switch;       // (1 byte)
   bool cooling_relay;      // (1 byte)
-  bool turbine_relay;      // (1 byte)
-} controller_data_struct;  // TOTAL = 14 bytes
+  bool fan_relay;      // (1 byte)
+  unsigned int seconds_since_last_cooling_rq;  // (4 bytes) seconds since last false->true relay change.
+} controller_data_struct;  // TOTAL = 18 bytes
 
 typedef struct monitor_data_struct {
   MessageTypeEnum msg_type;     // (1 byte)
   PeerRoleID sender_role;       // (1 byte)
   uint8_t fault_code;           // (1 byte) 0-no_fault; 1..255 monitor_fault_codes.
   float vapor_temp;             // (4 bytes) vapor line temperature readings [°C]
-  float low_pressure[3];        // (12 bytes) min - avg - max | low pressure readings [psi]
+  float low_pressure;           // (4 bytes) low pressure readings [psi]
   float discharge_temp;         // (4 bytes) discharge temperature readings [°C]
   float condenser_temp;         // (4 bytes) condenser saturated temp readings [°C]
   float liquid_temp;            // (4 bytes) liquid line temperature readings [°C]
-  float compressor_amps[3];     // (12 bytes) min - avg - max | compressor_current readings [A]
+  float compressor_amps;        // (4 bytes) compressor_current readings [A]
   bool compressor_state;        // (1 byte)
-  uint32_t running_time;        // (3 bytes) compressor hour-meeter. [hours]
-} monitor_data_struct;          // TOTAL = 47 bytes
+  unsigned int running_seconds; // (4 bytes) seconds. total seconds of the compressor_state being true
+} monitor_data_struct;          // TOTAL = 32 bytes
 
 typedef struct outgoing_settings_struct {
   MessageTypeEnum msg_type;     // (1 byte)
@@ -185,13 +184,12 @@ typedef struct outgoing_settings_struct {
   SysStateEnum system_state;    // (1 byte)
   float system_temp_sp;         // (4 bytes) [°C]
   float room_temp;              // (4 bytes) [°C]
-} outgoing_settings_struct;     // TOTAL = 9 bytes
+} outgoing_settings_struct;     // TOTAL = 12 bytes
 
 outgoing_settings_struct settings_data;
 pairing_data_struct pairing_data;
 controller_data_struct controller_data;
-monitor_data_struct monitor_01;
-monitor_data_struct monitor_02;
+monitor_data_struct monitor_data;
 
 //logger functions
 
@@ -291,33 +289,24 @@ void update_peer_list_in_fs(String received_data) {
     return;
   } 
   //get data
-  const char *controller_address = json["controller"] | "null";
-  const char *monitor01_address = json["monitor_01"] | "null";
-  const char *monitor02_address = json["monitor_02"] | "null";
+  const char *controller_address = json["controller"] | "null";  //FF.FF.FF.FF.FF.FF
+  const char *monitor_address = json["monitor"] | "null";
   uint8_t buffer[6];
 
   if (strcmp(controller_address, "null") != 0) //don't match
   {
-    info_logger("new mac address for controller received!");
+    info_logger("new serial for controller received!");
     debug_logger(controller_address);
     parse_mac_address(controller_address, '.', buffer, 6, 16);
     json["controller"] = print_device_mac(buffer);
   }
 
-  if (strcmp(monitor01_address, "null") != 0) //don't match
+  if (strcmp(monitor_address, "null") != 0) //don't match
   {
-    info_logger("new mac address for monitor_01 received!");
-    debug_logger(monitor01_address);
-    parse_mac_address(monitor01_address, ',', buffer, 6, 16);
-    json["monitor_01"] = print_device_mac(buffer);
-  }
-
-  if (strcmp(monitor02_address, "null") != 0) //don't match
-  {
-    info_logger("new mac address for monitor_02 received!");
-    debug_logger(monitor02_address);
-    parse_mac_address(monitor02_address, '.', buffer, 6, 16);
-    json["monitor_02"] = print_device_mac(buffer);
+    info_logger("new serial for MONITOR received!");
+    debug_logger(monitor_address);
+    parse_mac_address(monitor_address, '.', buffer, 6, 16);
+    json["monitor"] = print_device_mac(buffer);
   }
 
   //save data.
@@ -347,16 +336,10 @@ PeerRoleID get_peer_role_from_fs(const char * target_mac_address){
     return CONTROLLER;
   }
 
-  const char * monitor_01_mac_saved = json_doc["monitor_01"] | "null";
-  if (strcmp(monitor_01_mac_saved, target_mac_address) == 0){
-    info_logger("device found as monitor_01");
-    return MONITOR_A;
-  }
-
-  const char * monitor_02_mac_saved = json_doc["monitor_02"] | "null";
-  if (strcmp(monitor_02_mac_saved, target_mac_address) == 0){
-    info_logger("device found as monitor_02");
-    return MONITOR_B;
+  const char * monitor_saved = json_doc["monitor"] | "null";
+  if (strcmp(monitor_saved, target_mac_address) == 0){
+    info_logger("device found as monitor");
+    return MONITOR;
   }
 
   info_logger("device not found in SPIFFS!");
@@ -466,19 +449,11 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t * incomingData, int len)
       //-breaks
       break;
 
-    case MONITOR_A:
-      info_logger("[esp-now] message received from MONITOR_A device.");
-      monitor_01_online = true;
-      monitor_01_not_respnd_count = 0;
-      memcpy(&monitor_01, incomingData, sizeof(monitor_01));
-      //-breaks
-      break;
-
-    case MONITOR_B:
-      info_logger("[esp-now] message received from MONITOR_B device");
-      monitor_02_online = true;
-      monitor_02_not_respnd_count = 0;
-      memcpy(&monitor_02, incomingData, sizeof(monitor_02));
+    case MONITOR:
+      info_logger("[esp-now] message received from MONITOR device.");
+      monitor_online = true;
+      monitor_not_rspnd_count = 0;
+      memcpy(&monitor_data, incomingData, sizeof(monitor_data));
       //-breaks
       break;
     
@@ -1366,24 +1341,16 @@ void send_data_to_peers()
     controller_not_rspnd_count ++; //increase by one
     //- check if the max is reached.
     if (controller_not_rspnd_count >= MAX_NOT_RSPND_TO_OFFLINE) {
-      debug_logger("controller device is offline.");
+      debug_logger("CONTROLLER device is offline.");
       controller_online = false; // after not receive max_number, the device is offline.
     }
   }
 
-  if (monitor_01_online) {
-    monitor_01_not_respnd_count ++;
-    if (monitor_01_not_respnd_count >= MAX_NOT_RSPND_TO_OFFLINE) {
-      debug_logger("monitor_01 device is offline.");
-      monitor_01_online = false;
-    }
-  }
-
-  if (monitor_02_online) {
-    monitor_02_not_respnd_count ++;
-    if (monitor_02_not_respnd_count >= MAX_NOT_RSPND_TO_OFFLINE) {
-      debug_logger("monitor_02 device is offline.");
-      monitor_02_online = false;
+  if (monitor_online) {
+    monitor_not_rspnd_count ++;
+    if (monitor_not_rspnd_count >= MAX_NOT_RSPND_TO_OFFLINE) {
+      debug_logger("MONITOR device is offline.");
+      monitor_online = false;
     }
   }
 
@@ -1400,8 +1367,8 @@ void notify_state_update_to_broker()
 
   String message;
   JsonDocument doc;
-  doc["variable"] = "ac-hub";
-  doc["value"] = "state_notification";
+  doc["variable"] = "system_update";
+  doc["value"] = "state_change";
   doc["metadata"]["system_prev_state"] = StoredSysState;
   doc["metadata"]["system_new_state"] = SysState;
   doc["metadata"]["did"] = hub_device_serial;
@@ -1409,7 +1376,8 @@ void notify_state_update_to_broker()
 
   info_logger("Notifying MQTT broker on System State update..");
   // sending message.
-  bool message_sent = mqtt_client.publish("achub/device/stateNotification", message.c_str());
+  String topic = "achub/tago/data/post/" + hub_device_serial;
+  bool message_sent = mqtt_client.publish(topic.c_str(), message.c_str());
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "MQTT publish result: %s", message_sent ? "message sent!" : "fail");
 
   postMqttStateUpdate = false;
@@ -1434,9 +1402,9 @@ void send_data_to_broker() //[ok]
   String output;
   JsonDocument doc;
 
-  doc["variable"] = "ac-hub";
+  doc["variable"] = "ac_hub";
   doc["value"] = SysState;
-  doc["metadata"]["sn"] = hub_device_serial;
+  doc["metadata"]["did"] = hub_device_serial;
   doc["metadata"]["RSSI"] = WiFi.RSSI();
   doc["metadata"]["room_t"] = ambient_temp;
   doc["metadata"]["sys_mode"] = SysMode;
@@ -1445,23 +1413,33 @@ void send_data_to_broker() //[ok]
   doc["metadata"]["user_sp"] = userSetpoint;
   doc["metadata"]["active_sp"] = activeSetpoint;
   doc["metadata"]["controller"][0] = controller_online;
-  doc["metadata"]["monitor_01"][0] = monitor_01_online;
-  doc["metadata"]["monitor_02"][0] = monitor_02_online;
+  doc["metadata"]["monitor"][0] = monitor_online;
 
   if (controller_online) {
     doc["metadata"]["controller"][1] = controller_data.air_supply_temp;
     doc["metadata"]["controller"][2] = controller_data.air_return_temp;
     doc["metadata"]["controller"][3] = controller_data.cooling_relay;
-    doc["metadata"]["controller"][4] = controller_data.turbine_relay;
+    doc["metadata"]["controller"][4] = controller_data.fan_relay;
     doc["metadata"]["controller"][5] = controller_data.drain_switch;
+    doc["metadata"]["controller"][6] = controller_data.seconds_since_last_cooling_rq;
   }
 
-  // if controller is online then ->
-  //doc["metadata"]["controller"][1] = compressor_relay; ...
+  if (monitor_online) {
+    doc["metadata"]["monitor"][1] = monitor_data.compressor_amps;
+    doc["metadata"]["monitor"][2] = monitor_data.compressor_state;
+    doc["metadata"]["monitor"][3] = monitor_data.discharge_temp;
+    doc["metadata"]["monitor"][4] = monitor_data.condenser_temp;
+    doc["metadata"]["monitor"][5] = monitor_data.liquid_temp;
+    doc["metadata"]["monitor"][6] = monitor_data.low_pressure;
+    doc["metadata"]["monitor"][7] = monitor_data.vapor_temp;
+    doc["metadata"]["monitor"][8] = monitor_data.running_seconds;
+  }
+
 
   serializeJson(doc, output);
   info_logger("Publishing hub variables.");
-  bool mqtt_msg_sent = mqtt_client.publish("achub/tago/data/post", output.c_str());
+  String topic = "achub/tago/data/post/" + hub_device_serial;
+  bool mqtt_msg_sent = mqtt_client.publish(topic.c_str(), output.c_str());
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "MQTT publish result: %s", mqtt_msg_sent ? "message sent!" : "fail");
 
   //update posting interval value
@@ -1493,9 +1471,8 @@ void system_log() {
   root["timectrl"] = sleepControlEnabled;
   root["user_sp"] = userSetpoint;
   root["active_sp"] = activeSetpoint;
-  root["ctrllr"][0] = controller_online;
-  root["moni_01"][0] = monitor_01_online;
-  root["moni_02"][0] = monitor_02_online;
+  root["controller"] = controller_online;
+  root["monitor"] = monitor_online;
   //- output
   serializeJson(root, doc);
   debug_logger(doc.c_str());
