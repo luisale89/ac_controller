@@ -104,11 +104,13 @@ enum SysModeEnum {AUTO_MODE, FAN_MODE, COOL_MODE};
 enum SysStateEnum {SYSTEM_ON, SYSTEM_OFF, SYSTEM_SLEEP, UNKN};
 enum FlowFlag {FLAG_UP, FLAG_DOWN, FLAG_UNSET};
 enum SleepWakeCondition {SLEEP_ON_TIME, SLEEP_ON_ABSENCE, WAKE_ON_TIME, WAKE_ON_PRESENCE};
+enum LedAnimationStyle {PULSE, ALLWAYS_ON, ALLWAYS_OFF, BLINK};
 // Enum vars
 SysStateEnum SysState = UNKN;
 SysStateEnum PrevSysState = UNKN;
 SysStateEnum StoredSysState = UNKN;
 SysModeEnum SysMode = AUTO_MODE;
+SysModeEnum peersMode = FAN_MODE;
 FlowFlag sleep_flag = FLAG_UNSET;
 SleepWakeCondition sleep_condition = SLEEP_ON_TIME;
 SleepWakeCondition wake_condition = WAKE_ON_TIME;
@@ -126,6 +128,7 @@ bool lastRadarState = false;
 bool sleepControlEnabled; // Variables de activacion del modo sleep
 int led_brightness = 0;
 int led_fade_amount = 5;
+bool led_state = false;
 
 
 // NTP
@@ -208,20 +211,50 @@ void error_logger(const char *message) {
   ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "%s", message);
 }
 
-void network_led_pulse_effect() {
+void network_led_animation(LedAnimationStyle animation_style) {
   // pulse effect.
   currentMillis = millis();
-  if (currentMillis - lastNetworkLedBlink > 50L) { //tick, 50ms
-    lastNetworkLedBlink = currentMillis;
-    analogWrite(NETWORK_LED, led_brightness);
-    led_brightness = led_brightness + led_fade_amount;
-    //-validations
-    if (led_brightness > 125) {led_brightness = 125;}
-    if (led_brightness < 0) {led_brightness = 0;}
-    //-
-    if (led_brightness <= 0 || led_brightness >= 125) {
-      led_fade_amount = -led_fade_amount;
+
+  switch (animation_style)
+  {
+  case PULSE:
+    if (currentMillis - lastNetworkLedBlink > 50L) { //tick, 50ms
+      lastNetworkLedBlink = currentMillis;
+      analogWrite(NETWORK_LED, led_brightness);
+      led_brightness = led_brightness + led_fade_amount;
+      //-validations
+      if (led_brightness > 125) {led_brightness = 125;}
+      if (led_brightness < 0) {led_brightness = 0;}
+      //-
+      if (led_brightness <= 0 || led_brightness >= 125) {
+        led_fade_amount = -led_fade_amount;
+      }
     }
+    break;
+
+  case ALLWAYS_OFF:
+    analogWrite(NETWORK_LED, 0);
+    break;
+
+  case ALLWAYS_ON:
+    analogWrite(NETWORK_LED, 255);
+    break;
+
+  case BLINK:
+    if (currentMillis - lastNetworkLedBlink >= 250) {
+      lastNetworkLedBlink = currentMillis;
+      if (led_state == false) {
+        led_state = true;
+        analogWrite(NETWORK_LED, 255);
+      } else {
+        led_state = false;
+        analogWrite(NETWORK_LED, 0);
+      }
+    }
+  
+  default:
+    analogWrite(NETWORK_LED, 0);
+    break;
   }
 }
 
@@ -973,26 +1006,31 @@ void process_op_state_from_broker(String json) //[OK, OK]
 // Funcion que regula la temperatura
 void temp_setpoint_controller() // [OK]
 {
+  currentMillis = millis();
   switch (SysMode)
   {
   case AUTO_MODE:
     if (radarState) { // restart the counter if the radar state is true (movement detection)
-      radarStateTime = millis();
+      radarStateTime = currentMillis;
     }
-    if (millis() - radarStateTime > AutoTimeOut) {
+    if (currentMillis - radarStateTime > AutoTimeOut) {
       activeSetpoint = AutoSetpoint;
+      peersMode = AUTO_MODE;
     } else {
       activeSetpoint = userSetpoint;
+      peersMode = COOL_MODE;
     }
     break;
 
   case COOL_MODE:
     activeSetpoint = userSetpoint;
+    peersMode = COOL_MODE;
     info_logger("system Temp. adjust = 'UserTemp'");
     break;
 
   case FAN_MODE:
     activeSetpoint = userSetpoint;
+    peersMode = FAN_MODE;
     info_logger("system Temp. adjust = 'UserTemp'");
     break;
 
@@ -1247,6 +1285,8 @@ void connectToMQTT() {
   currentMillis = millis();
   if (mqtt_client.connected()) {return;}
   //-
+  network_led_animation(ALLWAYS_ON); //solid led indicates wifi connection but mqtt disonnection.
+  //-
   if (currentMillis - lastMqttReconnect >= mqttReconnectInterval)
   {
     lastMqttReconnect = currentMillis;
@@ -1302,7 +1342,10 @@ void connectToMQTT() {
 }
 
 void use_MQTT(){
-
+  if (!mqtt_client.connected()) {return;}
+  //-
+  currentMillis = millis();
+  network_led_animation(PULSE); // pulse animation on matt broker connection.
   //update mqtt posting interval value
   switch (SysState)
   {
@@ -1314,11 +1357,6 @@ void use_MQTT(){
     mqttPostingInterval = 5L * 60000L; // 5 minutos.
     break;
   }
-  if (!mqtt_client.connected()) {return;}
-  //-
-  currentMillis = millis();
-  //network led effect.
-  network_led_pulse_effect();
   // send all the sensor data to the mqtt broker
   post_vairables_to_broker();
   //sys update
@@ -1348,6 +1386,7 @@ void smartConfigSetup() {
     while (!WiFi.smartConfigDone())
     {
       info_logger("[wiFi] Waiting SmartConfig data...");
+      network_led_animation(BLINK); // 500ms blink.
       delay(500); //wait for smart config to arrive.
     }
     info_logger("[wifi] SmartConfig received!");
@@ -1356,6 +1395,7 @@ void smartConfigSetup() {
     // test wifi credentials received.
     while (WiFi.status() != WL_CONNECTED)
     {
+      network_led_animation(BLINK); // 500ms blink.
       delay(500);
     }
 
@@ -1385,9 +1425,15 @@ void wifiloop() //[ok]
     //WiFi.status() is other than WL_CONNECTED
     currentMillis = millis();
 
+    if (wiFiReconnectFlag == true) {
+      network_led_animation(ALLWAYS_OFF);
+    } else {
+      network_led_animation(BLINK); //250ms blink.
+    }
+
     if (currentMillis - lastWifiReconnect >= wifiReconnectInterval && wiFiReconnectFlag == true)
     {
-      info_logger("[wifi] testing new connection with the router.");
+      info_logger("[wifi] testing new connection to the router.");
       wiFiReconnectFlag = false;
       wiFiReconnectAttempt = 0;
       WiFi.reconnect();
@@ -1465,7 +1511,7 @@ void send_data_to_peers()
   // update settings variables.
   settings_data.msg_type = DATA;
   settings_data.sender_role = SERVER;
-  settings_data.system_mode = SysMode;
+  settings_data.system_mode = peersMode;
   settings_data.system_state = SysState;
   settings_data.system_temp_sp = activeSetpoint;
   settings_data.room_temp = ambient_temp;
