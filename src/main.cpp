@@ -3,6 +3,7 @@
 static const char* TAG = "main";
 // Libreria conexion wifi y tago
 #include <WiFi.h>
+#include "WiFiClientSecure.h"
 #include <PubSubClient.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
@@ -19,13 +20,7 @@ static const char* TAG = "main";
 #include <FS.h>
 #include <SPIFFS.h>
 #include <secrets.h>
-
-// LastWill MQTT
-const char willTopic[] = "achub/device/lastwill";
-const int willQoS = 0;
-const bool willRetain = false;
-const char willMessage[] = "disconnected";
-uint16_t mqttBufferSize = 768; // LuisLucena, bufferSize in bytes
+#include <credentials.h>
 
 // pinout
 #define NETWORK_LED 2
@@ -55,8 +50,9 @@ unsigned long lastRadarChange = 0;
 unsigned long radarStateTime = 0;
 unsigned long AutoTimeOut = 0;                           // wait time for moving sensor and setpoint change
 unsigned long mqttPostingInterval = 1L * 60000L;   // delay between updates, in milliseconds.. 1 minute and updates later on.
-const unsigned long radarDebounceTime = 1L * 60000L;     // 1 minute rebound for radar sensor.
-const unsigned long buttonTimeOut = 5L * 1000L;          // rebound 5seconds
+unsigned long currentMillis = 0;
+const unsigned long radarDebounceTime = 1L * 30000L;     // 30 seconds rebound for radar sensor.
+const unsigned long buttonTimeOut = 5L * 1000L;          // button pressed for 5seconds
 const unsigned long controllerInterval = 1L * 5000L;     // delay between sensor updates, 5 seconds
 const unsigned long SaluteTimer = 1L * 30000L;           // Tiempo para enviar que el dispositivo esta conectado,
 const unsigned long wifiReconnectInterval = 5L * 60000L;  // 5 minutos para intentar reconectar al wifi.
@@ -64,18 +60,22 @@ const unsigned long mqttReconnectInterval = 1L * 10000L; // 10 segundos para int
 const unsigned long wifiDisconnectedLedInterval = 250;        // 250 ms
 const unsigned long espnowPostingInterval = 10000L; // 10 seconds for espnow message post.
 
-// MQTT Broker
-const char *mqtt_broker = TEST_MQTT_BROKER;
-const char *settings_topic = "achub/system/operation/settings";
-const char *opstate_topic = "achub/system/operation/state";
-const char *opsetpoint_topic = "achub/system/operation/setpoint";
-const char *peer_list_topic = "achub/system/espnow/peer";
-const char *mqtt_username = "Token";
+// MQTT
+const char *mqtt_broker = MQTT_BROKER;
+// Topics
+String post_data_topic = "";
+String settings_topic = "";
+String opstate_topic = "";
+String opsetpoint_topic = "";
+String peer_list_topic = "";
+String lwill_topic = "";
+const char *mqtt_username = "achub";
 const char *mqtt_password = MQTT_PASSWORD;
-const int mqtt_port = 1883;
+const int mqtt_port = 8883;
 bool postToBroker = false;
 bool postToPeers = false;
 bool postMqttStateUpdate = false;
+uint16_t mqttBufferSize = 768; // LuisLucena, bufferSize in bytes
 
 // Handler de tareas de lectura de sensores para nucleo 0 o 1
 TaskHandle_t Task1;
@@ -86,8 +86,10 @@ String epass = "";
 String hub_device_serial = "";
 const char* AP_SSID = "AC-HUB";
 const char* AP_PASS = AP_PASSWORD;
-WiFiClient espClient;
+// WiFiClient espClient;
+WiFiClientSecure espClient;
 PubSubClient mqtt_client(espClient);
+//-
 int wiFiReconnectAttempt = 0;
 const int MAX_RECONNECT_ATTEMPTS = 33;
 bool wiFiReconnectFlag = false;
@@ -112,7 +114,6 @@ SleepWakeCondition sleep_condition = SLEEP_ON_TIME;
 SleepWakeCondition wake_condition = WAKE_ON_TIME;
 
 // Variables
-int network_led_state = LOW;
 int tempSensorResolution = 12; //bits
 int tempRequestDelay = 0;
 float userSetpoint;
@@ -123,6 +124,8 @@ bool Salute = false;
 bool radarState = false;
 bool lastRadarState = false;
 bool sleepControlEnabled; // Variables de activacion del modo sleep
+int led_brightness = 0;
+int led_fade_amount = 5;
 
 
 // NTP
@@ -203,6 +206,23 @@ void info_logger(const char *message) {
 
 void error_logger(const char *message) {
   ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "%s", message);
+}
+
+void network_led_pulse_effect() {
+  // pulse effect.
+  currentMillis = millis();
+  if (currentMillis - lastNetworkLedBlink > 50L) { //tick, 50ms
+    lastNetworkLedBlink = currentMillis;
+    analogWrite(NETWORK_LED, led_brightness);
+    led_brightness = led_brightness + led_fade_amount;
+    //-validations
+    if (led_brightness > 125) {led_brightness = 125;}
+    if (led_brightness < 0) {led_brightness = 0;}
+    //-
+    if (led_brightness <= 0 || led_brightness >= 125) {
+      led_fade_amount = -led_fade_amount;
+    }
+  }
 }
 
 //fs functions.
@@ -984,7 +1004,6 @@ void mqtt_message_callback(char *message_topic, byte *payload, unsigned int leng
 {
   String Mensaje;
   //begin.
-  digitalWrite(NETWORK_LED, LOW);
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "$ MQTT Message arrived on topic: %s", message_topic);
   for (int i = 0; i < length; i++)
   {
@@ -994,25 +1013,25 @@ void mqtt_message_callback(char *message_topic, byte *payload, unsigned int leng
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "+ Message: %s", Mensaje.c_str());
 
   // Selecciona la funcion acorde al topico al cual llego el mensaje
-  if (strcmp(message_topic, settings_topic) == 0)
+  if (strcmp(message_topic, settings_topic.c_str()) == 0)
   {
     // Cambia la configuracion del sistema
     info_logger("processing settings received from broker");
     process_settings_from_broker(Mensaje);
   }
-  else if (strcmp(message_topic, opstate_topic) == 0)
+  else if (strcmp(message_topic, opstate_topic.c_str()) == 0)
   {
     // Apaga o enciende el sistema
     info_logger("processing operation state received from broker");
     process_op_state_from_broker(Mensaje);
   }
-  else if (strcmp(message_topic, opsetpoint_topic) == 0)
+  else if (strcmp(message_topic, opsetpoint_topic.c_str()) == 0)
   {
     // Ajusta la temperatura del ambiente
     info_logger("processing temp. setpoint received from broker");
     process_temp_sp_from_broker(Mensaje);
   }
-  else if (strcmp(message_topic, peer_list_topic) == 0)
+  else if (strcmp(message_topic, peer_list_topic.c_str()) == 0)
   {
     // actualiza la lista de pares en el spiffs.
     info_logger("processing peer update.");
@@ -1025,7 +1044,6 @@ void mqtt_message_callback(char *message_topic, byte *payload, unsigned int leng
   // Levanta el Flag para envio de datos
   delay(100);
   postToBroker = true;
-  digitalWrite(NETWORK_LED, HIGH);
 }
 
 //funcion que ajusta el estado del sistema en funcion del horario y otros parametros.
@@ -1144,220 +1162,6 @@ void update_ambient_temperature() // defining
   return;
 }
 
-// Este loop verifica que el wifi este conectado correctamente
-void wifiloop() //[ok]
-{
-  // only wait for SmartConfig when the AP button is pressed.
-  const bool apBtnPressed = digitalRead(AP_BTN) ? false : true;
-  if (apBtnPressed)
-  {
-    info_logger("[wifi] the AP button has been pressed, setting up the new wifi network*");
-    info_logger("[wifi] Waiting for SmartConfig...");
-    WiFi.disconnect();
-    WiFi.beginSmartConfig();
-
-    while (!WiFi.smartConfigDone())
-    {
-      info_logger("[wiFi] Waiting SmartConfig data...");
-      network_led_state = (network_led_state == LOW) ? HIGH : LOW;
-      digitalWrite(NETWORK_LED, network_led_state);
-      delay(500); //wait for smart config to arrive.
-    }
-    info_logger("[wifi] SmartConfig received!");
-    info_logger("[wifi] Testing new WiFi credentials...");
-
-    // test wifi credentials received.
-    while (WiFi.status() != WL_CONNECTED)
-    {
-      network_led_state = (network_led_state == LOW) ? HIGH : LOW;
-      digitalWrite(NETWORK_LED, network_led_state);
-      delay(500);
-    }
-
-    info_logger("[wifi] Connected to new the network! smart config finished..");
-    // save wifi credential in filesystem.
-    save_wifi_data_in_fs();
-    info_logger("[esp] rebooting device. bye");
-    ESP.restart(); // restart esp.
-  }
-  
-  // WiFi connected
-  if ((WiFi.status() == WL_CONNECTED))
-  {
-    digitalWrite(NETWORK_LED, HIGH); // solid led indicates active wifi connection.
-
-    if ((!mqtt_client.connected()) && (millis() - lastMqttReconnect >= mqttReconnectInterval))
-    {
-      // connecting to a mqtt broker
-      info_logger("[mqtt] MQTT broker connection attempt..");
-      lastMqttReconnect = millis();
-      String client_id = "ac-hub-";
-      client_id += hub_device_serial;
-      ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[mqtt] client id: %s", client_id.c_str());
-      digitalWrite(NETWORK_LED, HIGH); //led pulse begin...
-      // Try mqtt connection to the broker.
-      if (mqtt_client.connect(client_id.c_str(), mqtt_username, mqtt_password, willTopic, willQoS, willRetain, willMessage))
-      {
-        info_logger("[mqtt] Connected to MQTT broker!");
-        // Publish and subscribe
-        info_logger("[mqtt] Subscribing to mqtt topics:");
-        mqtt_client.subscribe(settings_topic);
-        info_logger("[mqtt] Topic 1 ok");
-        mqtt_client.subscribe(opstate_topic);
-        info_logger("[mqtt] Topic 2 ok");
-        mqtt_client.subscribe(opsetpoint_topic);
-        info_logger("[mqtt] Topic 3 ok");
-        mqtt_client.subscribe(peer_list_topic);
-        info_logger("[mqtt] Topic 4 ok");
-        lastSaluteTime = millis();
-        Salute = false; // flag to send connection message.
-        info_logger("[mqtt] MQTT connection done. **");
-      }
-      else
-      {
-        ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[mqtt] Fail MQTT Connection with state: %d", mqtt_client.state());
-        return;
-      }
-    }
-
-    if (!Salute && millis() - lastSaluteTime > SaluteTimer)
-    {
-      mqtt_client.publish("achub/device/hello", "connected");
-      Salute = true;
-      info_logger("[mqtt] 'Salute' message sent");
-    }
-    return;
-  }
-
-  // WiFi Disconnected
-  if (WiFi.status() != WL_CONNECTED)
-  {
-    unsigned long currentTime = millis();
-    //led user feedback
-    if (currentTime - lastNetworkLedBlink >= wifiDisconnectedLedInterval)
-    {
-      lastNetworkLedBlink = currentTime;
-      network_led_state = (network_led_state == LOW) ? HIGH : LOW;
-      digitalWrite(NETWORK_LED, network_led_state);
-    }
-
-    if (currentTime - lastWifiReconnect >= wifiReconnectInterval && wiFiReconnectFlag == true)
-    {
-      info_logger("[wifi] testing new connection with the router.");
-      WiFi.reconnect();
-      wiFiReconnectFlag = false;
-      wiFiReconnectAttempt = 0;
-    }
-
-    return;
-  }
-}
-
-// Atualiza estado de entradas y salidas digitales.
-void update_IO() //[ok]
-{
-  const bool currentRadarReading = digitalRead(RADAR);
-  const bool manualBtnPressed = digitalRead(MANUAL_BTN) ? false : true; // input = 0 means button pressed
-
-  if (currentRadarReading != lastRadarState) {
-    lastRadarChange = millis();
-    lastRadarState = currentRadarReading;
-  }
-
-  // Lectura de sensor de movimiento.
-  if (millis() - lastRadarChange > radarDebounceTime) {
-    radarState = currentRadarReading;
-    // radarState has been updated after radarDebounceTime period. this prevents false presence/absence readings.
-  }
-
-  // Apaga o enciende el sistema depediendo del estado, previene cambiar el estado durante el buttonTimeOut.
-  if (manualBtnPressed && millis() - lastButtonPress > buttonTimeOut)
-  {
-    info_logger("Manual Button has been pressed..");
-
-    switch (SysState)
-    {
-    case SYSTEM_ON:
-      info_logger("- Turning off the system.");
-      SysState = SYSTEM_OFF;
-      break;
-
-    case SYSTEM_OFF:
-      info_logger("Turning on the system.");
-      SysState = SYSTEM_ON;
-      break;
-    
-    case SYSTEM_SLEEP:
-      info_logger("imposible to turn on the system on sleep mode.");
-      break;
-    }
-
-    lastButtonPress = millis();
-  }
-}
-
-// Envío de data de configuración a los pares.
-void send_data_to_peers()
-{
-  //-
-  const unsigned long current = millis();
-  if (espnow_connection_state == ESPNOW_IDLE) {return;}
-  //- check if its time to send a message to the peers
-  if (current - lastEspnowPost > espnowPostingInterval) {postToPeers = true;}
-  if (!postToPeers){return;}
-
-  info_logger("[esp-now] sending message to esp-now peers.");
-  esp_now_peer_num number_of_peers;
-  esp_now_get_peer_num(&number_of_peers);
-  if (number_of_peers.total_num == 0)
-  {
-    info_logger("[esp-now] peer list is empty. no message sent!");
-    postToPeers = false;
-    lastEspnowPost = current;
-    return;
-  }
-
-  // update settings variables.
-  settings_data.msg_type = DATA;
-  settings_data.sender_role = SERVER;
-  settings_data.system_mode = SysMode;
-  settings_data.system_state = SysState;
-  settings_data.system_temp_sp = activeSetpoint;
-  settings_data.room_temp = ambient_temp;
-
-  // send data to peers.
-  esp_err_t result = esp_now_send(NULL, (uint8_t *) &settings_data, sizeof(settings_data));
-
-  if (result == ESP_OK) {
-    info_logger("[esp-now] settings message sent.");
-  } else {
-    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[esp-now] error sending msg, reason: %s",  esp_err_to_name(result));
-  }
-
-  postToPeers = false;
-  lastEspnowPost = current;
-
-  if (controller_online) {
-    controller_not_rspnd_count ++; //increase by one
-    //- check if the max is reached.
-    if (controller_not_rspnd_count >= MAX_NOT_RSPND_TO_OFFLINE) {
-      debug_logger("CONTROLLER device is offline.");
-      controller_online = false; // after not receive max_number, the device is offline.
-    }
-  }
-
-  if (monitor_online) {
-    monitor_not_rspnd_count ++;
-    if (monitor_not_rspnd_count >= MAX_NOT_RSPND_TO_OFFLINE) {
-      debug_logger("MONITOR device is offline.");
-      monitor_online = false;
-    }
-  }
-
-  //-
-  return;
-}
-
 //notifica al broker el cambio de estado del sistema.
 void notify_state_update_to_broker()
 { 
@@ -1376,8 +1180,7 @@ void notify_state_update_to_broker()
 
   info_logger("Notifying MQTT broker on System State update..");
   // sending message.
-  String topic = "achub/tago/data/post/" + hub_device_serial;
-  bool message_sent = mqtt_client.publish(topic.c_str(), message.c_str());
+  bool message_sent = mqtt_client.publish(post_data_topic.c_str(), message.c_str());
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "MQTT publish result: %s", message_sent ? "message sent!" : "fail");
 
   postMqttStateUpdate = false;
@@ -1385,19 +1188,13 @@ void notify_state_update_to_broker()
 }
 
 // Envio de datos recurrente al broker mqtt
-void send_data_to_broker() //[ok]
+void post_vairables_to_broker() //[ok]
 {
-  // if there is no internet connection 
-  if (!mqtt_client.connected()){return;}
-
-  notify_state_update_to_broker();
-
+  currentMillis = millis();
   // check if its time to post a message.
-  if (millis() - lastMqttMessagePost > mqttPostingInterval) {postToBroker = true;}
+  if (currentMillis - lastMqttMessagePost > mqttPostingInterval) {postToBroker = true;}
   if (!postToBroker){return;}
 
-  // advance with the mqtt post.
-  double tdecimal = (int)(ambient_temp * 100 + 0.5) / 100.0;
   // json todas las variables.
   String output;
   JsonDocument doc;
@@ -1438,11 +1235,75 @@ void send_data_to_broker() //[ok]
 
   serializeJson(doc, output);
   info_logger("Publishing hub variables.");
-  String topic = "achub/tago/data/post/" + hub_device_serial;
-  bool mqtt_msg_sent = mqtt_client.publish(topic.c_str(), output.c_str());
+  bool mqtt_msg_sent = mqtt_client.publish(post_data_topic.c_str(), output.c_str());
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "MQTT publish result: %s", mqtt_msg_sent ? "message sent!" : "fail");
 
-  //update posting interval value
+  postToBroker = false;
+  lastMqttMessagePost = currentMillis;
+}
+
+void connectToMQTT() {
+  //- mqtt connections
+  currentMillis = millis();
+  if (mqtt_client.connected()) {return;}
+  //-
+  if (currentMillis - lastMqttReconnect >= mqttReconnectInterval)
+  {
+    lastMqttReconnect = currentMillis;
+    // check if time is updated.
+    if (time(nullptr) < 8 * 3600 * 2){
+      // X.509 validation requires synchronization time
+      info_logger("[mqtt] waiting time sync from ntp server for mqtt connection..");
+      return;
+    }
+    // time is ok.
+    // connecting to a mqtt broker
+    info_logger("[mqtt] MQTT broker connection attempt..");
+    //-
+    String client_id = "ac-hub-" + hub_device_serial;
+    ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "[mqtt] client id: %s", client_id.c_str());
+    //- lastWill
+    String lwill_msg;
+    JsonDocument doc;
+    doc["connection_state"] = "disconnected";
+    serializeJson(doc, lwill_msg);
+    const uint8_t lwill_qos = 0;
+    const bool lwill_retain = true;
+    // Try mqtt connection to the broker.
+    if (mqtt_client.connect(client_id.c_str(), mqtt_username, mqtt_password, lwill_topic.c_str(), lwill_qos, lwill_retain, lwill_msg.c_str(), true))
+    {
+      info_logger("[mqtt] Connected to MQTT broker!");
+      info_logger("[mqtt] Subscribing to mqtt topics:");
+      //-
+      mqtt_client.subscribe(settings_topic.c_str());
+      info_logger("[mqtt] settings topic ok");
+      //-
+      mqtt_client.subscribe(opstate_topic.c_str());
+      info_logger("[mqtt] op-state topic ok");
+      //-
+      mqtt_client.subscribe(opsetpoint_topic.c_str());
+      info_logger("[mqtt] op-setpoint topic ok");
+      //-
+      mqtt_client.subscribe(peer_list_topic.c_str());
+      info_logger("[mqtt] peer-list topic ok");
+      //-
+      lastSaluteTime = millis();
+      Salute = false; // flag to send connection message.
+      info_logger("[mqtt] MQTT connection done. **");
+    }
+    else
+    {
+      ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[mqtt] Fail MQTT Connection with state: %d", mqtt_client.state());
+      lastMqttReconnect = currentMillis;
+      info_logger("new mqtt reconnect attempt in 10 seconds");
+      return;
+    }
+  }
+}
+
+void use_MQTT(){
+
+  //update mqtt posting interval value
   switch (SysState)
   {
   case SYSTEM_ON:
@@ -1453,9 +1314,193 @@ void send_data_to_broker() //[ok]
     mqttPostingInterval = 5L * 60000L; // 5 minutos.
     break;
   }
+  if (!mqtt_client.connected()) {return;}
+  //-
+  currentMillis = millis();
+  //network led effect.
+  network_led_pulse_effect();
+  // send all the sensor data to the mqtt broker
+  post_vairables_to_broker();
+  //sys update
+  notify_state_update_to_broker();
+  //-salute
+  if (!Salute && currentMillis - lastSaluteTime > SaluteTimer)
+  {
+    String _msg;
+    JsonDocument doc;
+    doc["connection_state"] = "connected";
+    serializeJson(doc, _msg);
+    //-post message
+    mqtt_client.publish(lwill_topic.c_str(), _msg.c_str(), true); //retained message.
+    Salute = true;
+    info_logger("[mqtt] 'Salute' message sent");
+  }
+  return;
+}
 
-  postToBroker = false;
-  lastMqttMessagePost = millis();
+void smartConfigSetup() {
+    //setting up wifi credentials with smartConfig.
+    info_logger("[wifi] the AP button has been pressed, setting up the new wifi network*");
+    info_logger("[wifi] Waiting for SmartConfig...");
+    WiFi.disconnect();
+    WiFi.beginSmartConfig();
+
+    while (!WiFi.smartConfigDone())
+    {
+      info_logger("[wiFi] Waiting SmartConfig data...");
+      delay(500); //wait for smart config to arrive.
+    }
+    info_logger("[wifi] SmartConfig received!");
+    info_logger("[wifi] Testing new WiFi credentials...");
+
+    // test wifi credentials received.
+    while (WiFi.status() != WL_CONNECTED)
+    {
+      delay(500);
+    }
+
+    info_logger("[wifi] Connected to new the network! smart config finished..");
+    // save wifi credential in filesystem.
+    save_wifi_data_in_fs();
+    info_logger("[esp] rebooting device. bye");
+    ESP.restart(); // restart esp.
+}
+
+// Este loop verifica que el wifi este conectado correctamente
+void wifiloop() //[ok]
+{
+  // only wait for SmartConfig when the AP button is pressed.
+  const bool apBtnPressed = digitalRead(AP_BTN) ? false : true;
+  if (apBtnPressed) {smartConfigSetup();}
+  
+  switch (WiFi.status())
+  {
+  case WL_CONNECTED:
+    // WiFi is connected to the router.
+    connectToMQTT();
+    use_MQTT();
+    break;
+  
+  default:
+    //WiFi.status() is other than WL_CONNECTED
+    currentMillis = millis();
+
+    if (currentMillis - lastWifiReconnect >= wifiReconnectInterval && wiFiReconnectFlag == true)
+    {
+      info_logger("[wifi] testing new connection with the router.");
+      wiFiReconnectFlag = false;
+      wiFiReconnectAttempt = 0;
+      WiFi.reconnect();
+    }
+    break;
+  }
+}
+
+// Atualiza estado de entradas y salidas digitales.
+void update_IO() //[ok]
+{
+  currentMillis = millis();
+  const bool currentRadarReading = digitalRead(RADAR);
+  const bool manualBtnPressed = digitalRead(MANUAL_BTN) ? false : true; // input = 0 means button pressed
+  const bool apBtnPressed = digitalRead(AP_BTN) ? false : true;
+
+  if (currentRadarReading != lastRadarState) {
+    lastRadarChange = currentMillis;
+    lastRadarState = currentRadarReading;
+  }
+
+  // Lectura de sensor de movimiento.
+  if (currentMillis - lastRadarChange > radarDebounceTime) {
+    radarState = currentRadarReading;
+    // radarState has been updated after radarDebounceTime period. this prevents false presence/absence readings.
+  }
+
+  // Apaga o enciende el sistema depediendo del estado, previene cambiar el estado durante el buttonTimeOut.
+  if (manualBtnPressed &&currentMillis - lastButtonPress > buttonTimeOut)
+  {
+    info_logger("Manual Button has been pressed..");
+
+    switch (SysState)
+    {
+    case SYSTEM_ON:
+      info_logger("- Turning off the system.");
+      SysState = SYSTEM_OFF;
+      break;
+
+    case SYSTEM_OFF:
+      info_logger("Turning on the system.");
+      SysState = SYSTEM_ON;
+      break;
+    
+    case SYSTEM_SLEEP:
+      info_logger("imposible to turn on the system on sleep mode.");
+      break;
+    }
+
+    lastButtonPress = currentMillis;
+  }
+}
+
+// Envío de data de configuración a los pares.
+void send_data_to_peers()
+{
+  //-
+  currentMillis = millis();
+  if (espnow_connection_state == ESPNOW_IDLE) {return;}
+  //- check if its time to send a message to the peers
+  if (currentMillis - lastEspnowPost > espnowPostingInterval) {postToPeers = true;}
+  if (!postToPeers){return;}
+
+  info_logger("[esp-now] sending message to esp-now peers.");
+  esp_now_peer_num number_of_peers;
+  esp_now_get_peer_num(&number_of_peers);
+  if (number_of_peers.total_num == 0)
+  {
+    info_logger("[esp-now] peer list is empty. no message sent!");
+    postToPeers = false;
+    lastEspnowPost = currentMillis;
+    return;
+  }
+
+  // update settings variables.
+  settings_data.msg_type = DATA;
+  settings_data.sender_role = SERVER;
+  settings_data.system_mode = SysMode;
+  settings_data.system_state = SysState;
+  settings_data.system_temp_sp = activeSetpoint;
+  settings_data.room_temp = ambient_temp;
+
+  // send data to peers.
+  esp_err_t result = esp_now_send(NULL, (uint8_t *) &settings_data, sizeof(settings_data));
+
+  if (result == ESP_OK) {
+    info_logger("[esp-now] settings message sent.");
+  } else {
+    ESP_LOG_LEVEL(ESP_LOG_ERROR, TAG, "[esp-now] error sending msg, reason: %s",  esp_err_to_name(result));
+  }
+
+  postToPeers = false;
+  lastEspnowPost = currentMillis;
+
+  if (controller_online) {
+    controller_not_rspnd_count ++; //increase by one
+    //- check if the max is reached.
+    if (controller_not_rspnd_count > MAX_NOT_RSPND_TO_OFFLINE) {
+      debug_logger("CONTROLLER device is offline.");
+      controller_online = false; // after not receive max_number, the device is offline.
+    }
+  }
+
+  if (monitor_online) {
+    monitor_not_rspnd_count ++;
+    if (monitor_not_rspnd_count > MAX_NOT_RSPND_TO_OFFLINE) {
+      debug_logger("MONITOR device is offline.");
+      monitor_online = false;
+    }
+  }
+
+  //-
+  return;
 }
 
 void system_log() {
@@ -1480,7 +1525,7 @@ void system_log() {
   return;
 }
 
-void check_for_updates_to_post() {
+void check_for_updates() {
 
   // if there is no change
   if (PrevSysState != SysState)
@@ -1521,12 +1566,9 @@ void sensors_read(void *pvParameters)
     // Update inputs and outputs
     update_IO();
     // check if is required to post data to the broker or to the peers.
-    check_for_updates_to_post();
-    // send all the sensor data to the mqtt broker
-    send_data_to_broker();
+    check_for_updates();
     // Envía las configuraciones a los pares esp-now.
     send_data_to_peers();
-
     // task delay
     vTaskDelay(xDelay);
   }
@@ -1618,10 +1660,18 @@ void setup()
   info_logger("ESP_NOW Setup Complete!");
   //---------------------------------------- mqtt settings
   info_logger("Setting up MQTT");
+  espClient.setCACert(ca_cert); // mqtt broker ca-cert.
   mqtt_client.setBufferSize(mqttBufferSize);
   mqtt_client.setServer(mqtt_broker, mqtt_port);
   mqtt_client.setCallback(mqtt_message_callback);
   info_logger("Mqtt settings done.");
+  //---------------------------------------- update mqtt topics
+  settings_topic = "achub/settings/" + hub_device_serial;
+  opstate_topic = "achub/operation/state/" + hub_device_serial;
+  opsetpoint_topic = "achub/operation/setpoint/" + hub_device_serial;
+  peer_list_topic = "achub/espnow/peer/" + hub_device_serial;
+  lwill_topic = "achub/connection/" + hub_device_serial;
+  post_data_topic = "achub/data/post/" + hub_device_serial;
   //---------------------------------------- datetime from ntp server
   info_logger("Creating NTP server configuration.");
   sntp_set_time_sync_notification_cb(timeavailable);        // sntp sync interval is 1 hour.
