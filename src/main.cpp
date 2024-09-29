@@ -72,7 +72,7 @@ String lwill_topic = "";
 const char *mqtt_username = "achub";
 const char *mqtt_password = MQTT_PASSWORD;
 const int mqtt_port = 8883;
-bool postToBroker = false;
+bool postMqttVariables = false;
 bool postToPeers = false;
 bool postMqttStateUpdate = false;
 uint16_t mqttBufferSize = 768; // LuisLucena, bufferSize in bytes
@@ -108,7 +108,7 @@ enum LedAnimationStyle {PULSE, ALLWAYS_ON, ALLWAYS_OFF, BLINK};
 // Enum vars
 SysStateEnum SysState = UNKN;
 SysStateEnum PrevSysState = UNKN;
-SysStateEnum StoredSysState = UNKN;
+SysStateEnum SysStateBuffer = UNKN;
 SysModeEnum SysMode = AUTO_MODE;
 SysModeEnum peersMode = FAN_MODE;
 FlowFlag sleep_flag = FLAG_UNSET;
@@ -1081,7 +1081,7 @@ void mqtt_message_callback(char *message_topic, byte *payload, unsigned int leng
 
   // Levanta el Flag para envio de datos
   delay(100);
-  postToBroker = true;
+  postMqttVariables = true;
 }
 
 //funcion que ajusta el estado del sistema en funcion del horario y otros parametros.
@@ -1211,7 +1211,7 @@ void notify_state_update_to_broker()
   JsonDocument doc;
   doc["variable"] = "system_update";
   doc["value"] = "state_change";
-  doc["metadata"]["system_prev_state"] = StoredSysState;
+  doc["metadata"]["system_prev_state"] = SysStateBuffer;
   doc["metadata"]["system_new_state"] = SysState;
   doc["metadata"]["did"] = hub_device_serial;
   serializeJson(doc, message);
@@ -1230,8 +1230,8 @@ void post_vairables_to_broker() //[ok]
 {
   currentMillis = millis();
   // check if its time to post a message.
-  if (currentMillis - lastMqttMessagePost > mqttPostingInterval) {postToBroker = true;}
-  if (!postToBroker){return;}
+  if (currentMillis - lastMqttMessagePost > mqttPostingInterval) {postMqttVariables = true;}
+  if (!postMqttVariables){return;}
 
   // json todas las variables.
   String output;
@@ -1276,7 +1276,19 @@ void post_vairables_to_broker() //[ok]
   bool mqtt_msg_sent = mqtt_client.publish(post_data_topic.c_str(), output.c_str());
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "MQTT publish result: %s", mqtt_msg_sent ? "message sent!" : "fail");
 
-  postToBroker = false;
+  //update mqtt posting interval value
+  switch (SysState)
+  {
+  case SYSTEM_ON:
+    mqttPostingInterval = 2L * 30000L; // 1 minuto.
+    break;
+  
+  default:
+    mqttPostingInterval = 5L * 60000L; // 5 minutos.
+    break;
+  }
+
+  postMqttVariables = false;
   lastMqttMessagePost = currentMillis;
 }
 
@@ -1285,7 +1297,7 @@ void connectToMQTT() {
   currentMillis = millis();
   if (mqtt_client.connected()) {return;}
   //-
-  network_led_animation(ALLWAYS_ON); //solid led indicates wifi connection but mqtt disonnection.
+  network_led_animation(ALLWAYS_ON); //solid led indicates wifi connection but disconnected from the mqtt broker.
   //-
   if (currentMillis - lastMqttReconnect >= mqttReconnectInterval)
   {
@@ -1342,21 +1354,12 @@ void connectToMQTT() {
 }
 
 void use_MQTT(){
+  //-
   if (!mqtt_client.connected()) {return;}
   //-
   currentMillis = millis();
-  network_led_animation(PULSE); // pulse animation on matt broker connection.
-  //update mqtt posting interval value
-  switch (SysState)
-  {
-  case SYSTEM_ON:
-    mqttPostingInterval = 2L * 30000L; // 1 minuto.
-    break;
-  
-  default:
-    mqttPostingInterval = 5L * 60000L; // 5 minutos.
-    break;
-  }
+  // pulse animation on matt broker connection.
+  network_led_animation(PULSE);
   // send all the sensor data to the mqtt broker
   post_vairables_to_broker();
   //sys update
@@ -1447,7 +1450,7 @@ void update_IO() //[ok]
 {
   currentMillis = millis();
   const bool currentRadarReading = digitalRead(RADAR);
-  const bool manualBtnPressed = digitalRead(MANUAL_BTN) ? false : true; // input = 0 means button pressed
+  const bool manuBtnPressed = digitalRead(MANUAL_BTN) ? false : true; // input = 0 means button pressed
   const bool apBtnPressed = digitalRead(AP_BTN) ? false : true;
 
   if (currentRadarReading != lastRadarState) {
@@ -1461,10 +1464,16 @@ void update_IO() //[ok]
     // radarState has been updated after radarDebounceTime period. this prevents false presence/absence readings.
   }
 
-  // Apaga o enciende el sistema depediendo del estado, previene cambiar el estado durante el buttonTimeOut.
-  if (manualBtnPressed &&currentMillis - lastButtonPress > buttonTimeOut)
+  //manual button
+  if (!manuBtnPressed) { // button not pressed.
+    lastButtonPress = currentMillis;
+  }
+
+  // Press the button for 'buttonTimeOut' value. like a key stroke.
+  if (manuBtnPressed && currentMillis - lastButtonPress > buttonTimeOut)
   {
-    info_logger("Manual Button has been pressed..");
+    info_logger("Manual button has been pressed..");
+    lastButtonPress = currentMillis;
 
     switch (SysState)
     {
@@ -1482,8 +1491,6 @@ void update_IO() //[ok]
       info_logger("imposible to turn on the system on sleep mode.");
       break;
     }
-
-    lastButtonPress = currentMillis;
   }
 }
 
@@ -1573,16 +1580,16 @@ void system_log() {
 
 void check_for_updates() {
 
-  // if there is no change
+  // if there is a sysState change
   if (PrevSysState != SysState)
   {
     info_logger("System state has changed. sending updates.");
-    StoredSysState = PrevSysState;
+    SysStateBuffer = PrevSysState;
     PrevSysState = SysState; // assign PrevSysState the current SysState
     save_operation_state_in_fs();
     postToPeers = true; // post to espnow peers.
     postMqttStateUpdate = true; // post to the broker.
-    return;
+    postMqttVariables = true;
   }
   return;
 }
@@ -1591,7 +1598,7 @@ void check_for_updates() {
 // Hace la lectura y envio de datos.
 void sensors_read(void *pvParameters)
 {
-
+  //-
   const TickType_t xDelay = 50 / portTICK_PERIOD_MS;
   for (;;)
   { 
