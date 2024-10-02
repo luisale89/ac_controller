@@ -50,9 +50,8 @@ unsigned long lastRadarChange = 0;
 unsigned long radarStateTime = 0;
 unsigned long AutoTimeOut = 0;                           // wait time for moving sensor and setpoint change
 unsigned long mqttPostingInterval = 1L * 60000L;   // delay between updates, in milliseconds.. 1 minute and updates later on.
-unsigned long currentMillis = 0;
 const unsigned long radarDebounceTime = 1L * 30000L;     // 30 seconds rebound for radar sensor.
-const unsigned long buttonTimeOut = 5L * 1000L;          // button pressed for 5seconds
+const unsigned long buttonTimeOut = 3L * 1000L;          // button pressed for 3seconds
 const unsigned long controllerInterval = 1L * 5000L;     // delay between sensor updates, 5 seconds
 const unsigned long SaluteTimer = 1L * 30000L;           // Tiempo para enviar que el dispositivo esta conectado,
 const unsigned long wifiReconnectInterval = 5L * 60000L;  // 5 minutos para intentar reconectar al wifi.
@@ -217,13 +216,13 @@ void error_logger(const char *message) {
 
 void network_led_animation(LedAnimationStyle animation_style) {
   // pulse effect.
-  currentMillis = millis();
+  const unsigned long current = millis();
 
   switch (animation_style)
   {
   case PULSE:
-    if (currentMillis - lastNetworkLedBlink > 50L) { //tick, 50ms
-      lastNetworkLedBlink = currentMillis;
+    if (current - lastNetworkLedBlink > 50L) { //tick, 50ms
+      lastNetworkLedBlink = current;
       analogWrite(NETWORK_LED, led_brightness);
       led_brightness = led_brightness + led_fade_amount;
       //-validations
@@ -245,8 +244,8 @@ void network_led_animation(LedAnimationStyle animation_style) {
     break;
 
   case BLINK:
-    if (currentMillis - lastNetworkLedBlink >= 250) {
-      lastNetworkLedBlink = currentMillis;
+    if (current - lastNetworkLedBlink >= 250) {
+      lastNetworkLedBlink = current;
       if (led_state == false) {
         led_state = true;
         analogWrite(NETWORK_LED, 255);
@@ -1010,14 +1009,14 @@ void process_op_state_from_broker(String json) //[OK, OK]
 // Funcion que regula la temperatura
 void temp_setpoint_controller() // [OK]
 {
-  currentMillis = millis();
+  const unsigned long current = millis();
   switch (SysMode)
   {
   case AUTO_MODE:
     if (radarState) { // restart the counter if the radar state is true (movement detection)
-      radarStateTime = currentMillis;
+      radarStateTime = current;
     }
-    if (currentMillis - radarStateTime > AutoTimeOut) {
+    if (current - radarStateTime > AutoTimeOut) {
       activeSetpoint = AutoSetpoint;
       peersMode = AUTO_MODE;
     } else {
@@ -1060,6 +1059,7 @@ void mqtt_message_callback(char *message_topic, byte *payload, unsigned int leng
     // Cambia la configuracion del sistema
     info_logger("processing settings received from broker");
     process_settings_from_broker(Mensaje);
+    postVariablesToBroker = true;
   }
   else if (strcmp(message_topic, opstate_topic.c_str()) == 0)
   {
@@ -1072,6 +1072,7 @@ void mqtt_message_callback(char *message_topic, byte *payload, unsigned int leng
     // Ajusta la temperatura del ambiente
     info_logger("processing temp. setpoint received from broker");
     process_temp_sp_from_broker(Mensaje);
+    postVariablesToBroker = true;
   }
   else if (strcmp(message_topic, peer_list_topic.c_str()) == 0)
   {
@@ -1083,9 +1084,11 @@ void mqtt_message_callback(char *message_topic, byte *payload, unsigned int leng
     error_logger("mqtt topic not implemented.");
   }
 
+
+  // Levanta el Flag para envio de datos
+  
   // Levanta el Flag para envio de datos
   delay(100);
-  postVariablesToBroker = true;
 }
 
 //funcion que ajusta el estado del sistema en funcion del horario y otros parametros.
@@ -1232,7 +1235,7 @@ void notify_state_update_to_broker()
 // Envio de datos recurrente al broker mqtt
 void post_vairables_to_broker() //[ok]
 {
-  currentMillis = millis();
+  const unsigned long currentMillis = millis();
   // check if its time to post a message.
   if (currentMillis - lastMqttMessagePost > mqttPostingInterval) {postVariablesToBroker = true;}
   if (!postVariablesToBroker){return;}
@@ -1298,7 +1301,7 @@ void post_vairables_to_broker() //[ok]
 
 void connectToMQTT() {
   //- mqtt connections
-  currentMillis = millis();
+  const unsigned long currentMillis = millis();
   if (mqtt_client.connected()) {return;}
   //-
   network_led_animation(ALLWAYS_ON); //solid led indicates wifi connection but disconnected from the mqtt broker.
@@ -1361,7 +1364,7 @@ void use_MQTT(){
   //-
   if (!mqtt_client.connected()) {return;}
   //-
-  currentMillis = millis();
+  const unsigned long currentMillis = millis();
   // pulse animation on matt broker connection.
   network_led_animation(PULSE);
   // send all the sensor data to the mqtt broker
@@ -1430,7 +1433,6 @@ void wifiloop() //[ok]
   
   default:
     //WiFi.status() is other than WL_CONNECTED
-    currentMillis = millis();
 
     if (wiFiReconnectFlag == true) {
       network_led_animation(ALLWAYS_OFF);
@@ -1438,7 +1440,7 @@ void wifiloop() //[ok]
       network_led_animation(BLINK); //250ms blink.
     }
 
-    if (currentMillis - lastWifiReconnect >= wifiReconnectInterval && wiFiReconnectFlag == true)
+    if (millis() - lastWifiReconnect >= wifiReconnectInterval && wiFiReconnectFlag == true)
     {
       info_logger("[wifi] testing new connection to the router.");
       wiFiReconnectFlag = false;
@@ -1452,32 +1454,31 @@ void wifiloop() //[ok]
 // Atualiza estado de entradas y salidas digitales.
 void update_IO() //[ok]
 {
-  currentMillis = millis();
+  const unsigned long current_millis = millis();
   const bool currentRadarReading = digitalRead(RADAR);
   const bool manuBtnPressed = digitalRead(MANUAL_BTN) ? false : true; // input = 0 means button pressed
-  const bool apBtnPressed = digitalRead(AP_BTN) ? false : true;
 
   if (currentRadarReading != lastRadarState) {
-    lastRadarChange = currentMillis;
+    lastRadarChange = millis();
     lastRadarState = currentRadarReading;
   }
 
   // Lectura de sensor de movimiento.
-  if (currentMillis - lastRadarChange > radarDebounceTime) {
-    radarState = currentRadarReading;
+  if (current_millis - lastRadarChange > radarDebounceTime) {
+    radarState = lastRadarState;
     // radarState has been updated after radarDebounceTime period. this prevents false presence/absence readings.
   }
 
   //manual button
   if (!manuBtnPressed) { // button not pressed.
-    lastButtonPress = currentMillis;
+    lastButtonPress = current_millis;
   }
 
   // Press the button for 'buttonTimeOut' value. like a key stroke.
-  if (manuBtnPressed && currentMillis - lastButtonPress > buttonTimeOut)
+  if (manuBtnPressed && current_millis - lastButtonPress > buttonTimeOut)
   {
     info_logger("Manual button has been pressed..");
-    lastButtonPress = currentMillis;
+    lastButtonPress = current_millis;
 
     switch (SysState)
     {
@@ -1502,7 +1503,7 @@ void update_IO() //[ok]
 void send_data_to_peers()
 {
   //-
-  currentMillis = millis();
+  const unsigned long currentMillis = millis();
   if (espnow_connection_state == ESPNOW_IDLE) {return;}
   //- check if its time to send a message to the peers
   if (currentMillis - lastEspnowPost > espnowPostingInterval) {postToPeers = true;}
@@ -1601,13 +1602,11 @@ void check_for_updates() {
     if (cooling_relay_state != controller_data.cooling_relay) {
       cooling_relay_state = controller_data.cooling_relay;
       postVariablesToBroker = true; // set flag to post variables.
-      return;
     }
 
     if (fan_relay_state != controller_data.fan_relay) {
       fan_relay_state = controller_data.fan_relay;
       postVariablesToBroker = true;
-      return;
     }
   }
 
