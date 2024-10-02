@@ -72,7 +72,7 @@ String lwill_topic = "";
 const char *mqtt_username = "achub";
 const char *mqtt_password = MQTT_PASSWORD;
 const int mqtt_port = 8883;
-bool postMqttVariables = false;
+bool postVariablesToBroker = false;
 bool postToPeers = false;
 bool postMqttStateUpdate = false;
 uint16_t mqttBufferSize = 768; // LuisLucena, bufferSize in bytes
@@ -129,6 +129,8 @@ bool sleepControlEnabled; // Variables de activacion del modo sleep
 int led_brightness = 0;
 int led_fade_amount = 5;
 bool led_state = false;
+bool cooling_relay_state = false;
+bool fan_relay_state = false;
 
 
 // NTP
@@ -194,7 +196,9 @@ typedef struct outgoing_settings_struct {
 
 outgoing_settings_struct settings_data;
 pairing_data_struct pairing_data;
-controller_data_struct controller_data;
+controller_data_struct controller_data = { //initial data
+  DATA, UNSET, 0x00, 24, 24, true, false, false, 0
+};
 monitor_data_struct monitor_data;
 
 //logger functions
@@ -1081,7 +1085,7 @@ void mqtt_message_callback(char *message_topic, byte *payload, unsigned int leng
 
   // Levanta el Flag para envio de datos
   delay(100);
-  postMqttVariables = true;
+  postVariablesToBroker = true;
 }
 
 //funcion que ajusta el estado del sistema en funcion del horario y otros parametros.
@@ -1230,8 +1234,8 @@ void post_vairables_to_broker() //[ok]
 {
   currentMillis = millis();
   // check if its time to post a message.
-  if (currentMillis - lastMqttMessagePost > mqttPostingInterval) {postMqttVariables = true;}
-  if (!postMqttVariables){return;}
+  if (currentMillis - lastMqttMessagePost > mqttPostingInterval) {postVariablesToBroker = true;}
+  if (!postVariablesToBroker){return;}
 
   // json todas las variables.
   String output;
@@ -1276,19 +1280,19 @@ void post_vairables_to_broker() //[ok]
   bool mqtt_msg_sent = mqtt_client.publish(post_data_topic.c_str(), output.c_str());
   ESP_LOG_LEVEL(ESP_LOG_INFO, TAG, "MQTT publish result: %s", mqtt_msg_sent ? "message sent!" : "fail");
 
-  //update mqtt posting interval value
+  //- set posting interval based on the system state value.
   switch (SysState)
   {
   case SYSTEM_ON:
-    mqttPostingInterval = 2L * 30000L; // 1 minuto.
+    mqttPostingInterval = 1L * 60000L; // 1 minuto.
     break;
   
   default:
-    mqttPostingInterval = 5L * 60000L; // 5 minutos.
+    mqttPostingInterval = 2L * 60000L; // 2 minutos.
     break;
   }
 
-  postMqttVariables = false;
+  postVariablesToBroker = false;
   lastMqttMessagePost = currentMillis;
 }
 
@@ -1364,7 +1368,7 @@ void use_MQTT(){
   post_vairables_to_broker();
   //sys update
   notify_state_update_to_broker();
-  //-salute
+  //-publish 'connected' message to lwill topic.
   if (!Salute && currentMillis - lastSaluteTime > SaluteTimer)
   {
     String _msg;
@@ -1588,9 +1592,25 @@ void check_for_updates() {
     PrevSysState = SysState; // assign PrevSysState the current SysState
     save_operation_state_in_fs();
     postToPeers = true; // post to espnow peers.
-    postMqttStateUpdate = true; // post to the broker.
-    postMqttVariables = true;
+    postMqttStateUpdate = true; // post state update.
+    return;
   }
+
+  // send variables when compressor relay changes state.
+  if (controller_online) {
+    if (cooling_relay_state != controller_data.cooling_relay) {
+      cooling_relay_state = controller_data.cooling_relay;
+      postVariablesToBroker = true; // set flag to post variables.
+      return;
+    }
+
+    if (fan_relay_state != controller_data.fan_relay) {
+      fan_relay_state = controller_data.fan_relay;
+      postVariablesToBroker = true;
+      return;
+    }
+  }
+
   return;
 }
 
